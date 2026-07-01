@@ -336,6 +336,7 @@ final class ConfigStore {
                 if candidate.userAdded {
                     existingProfile.isUserAdded = true
                 }
+                normalizePlanConsistency(&existingProfile)
                 if identity != nil ||
                     existingProfile.isUserAdded == true ||
                     existingProfile.signedIn == true ||
@@ -350,6 +351,10 @@ final class ConfigStore {
                 profile = .make(provider: candidate.provider, appPath: candidate.appPath, dataDir: candidate.dataDir, identity: identity, isUserAdded: candidate.userAdded)
                 profile?.scanSignature = signature
                 profile?.scanUpdatedAt = Date()
+                if var madeProfile = profile {
+                    normalizePlanConsistency(&madeProfile)
+                    profile = madeProfile
+                }
                 resultsByKey[key] = profile
             }
         }
@@ -455,6 +460,17 @@ final class ConfigStore {
         if profile.dataDir.contains("/Library/Application Support/Codex") { score += 3 }
         if profile.dataDir.contains("/Library/Application Support/com.openai.codex") { score -= 2 }
         return score
+    }
+
+    private func normalizePlanConsistency(_ profile: inout LaunchProfile) {
+        guard profile.provider == .claude else { return }
+        if profile.billingType == "none" {
+            profile.accountPlan = "Free"
+            if var usage = profile.usage {
+                usage.accountPlan = "Free"
+                profile.usage = usage
+            }
+        }
     }
 
     private func sortProfiles(_ lhs: LaunchProfile, _ rhs: LaunchProfile) -> Bool {
@@ -783,6 +799,10 @@ enum AccountResolver {
     }
 
     private static func planName(provider: Provider, billingType: String?, planSignals: [String]) -> String? {
+        if provider == .claude, billingType == "none" {
+            return "Free"
+        }
+
         if let explicitPlan = planSignals.first(where: { signal in
             let lower = signal.lowercased()
             return ["max", "pro", "team", "plus", "free"].contains(lower)
@@ -793,10 +813,7 @@ enum AccountResolver {
         switch provider {
         case .claude:
             if billingType == "stripe_subscription" {
-                return "Paid subscription"
-            }
-            if billingType == "none" {
-                return "Free"
+                return "Pro"
             }
         case .codex:
             return nil
@@ -2259,6 +2276,25 @@ enum ProfileFormatting {
         return isRefreshing ? "Checking account and quota..." : "Usage not refreshed yet"
     }
 
+    static func usageLines(for profile: LaunchProfile, isRefreshing: Bool) -> [String] {
+        if let usage = profile.usage {
+            var lines = usage.windows.prefix(3).map { window in
+                "\(window.title): \(window.displayText.replacingOccurrences(of: " - ", with: " · "))"
+            }
+            if let creditsRemaining = usage.creditsRemaining {
+                lines.append(String(format: "Credits: %.0f", creditsRemaining))
+            }
+            if lines.isEmpty, let status = usage.status {
+                lines.append(status)
+            }
+            return lines.isEmpty ? ["Usage unavailable"] : lines
+        }
+        if profile.isPendingLogin == true {
+            return ["Waiting for login in the isolated profile"]
+        }
+        return [isRefreshing ? "Checking account and quota..." : "Usage not refreshed yet"]
+    }
+
     static func primaryUsagePercent(for profile: LaunchProfile) -> Double? {
         profile.usage?.primaryPercentUsed
     }
@@ -2367,50 +2403,66 @@ final class UsageBarView: NSView {
 
 final class ProfileMenuItemView: NSView {
     private let profileID: String
+    private weak var actionTarget: AnyObject?
+    private let action: Selector
+    private let openButton = NSButton(title: "", target: nil, action: nil)
 
     init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool) {
         self.profileID = profile.id
-        super.init(frame: NSRect(x: 0, y: 0, width: 430, height: 82))
+        self.actionTarget = target
+        self.action = action
+        super.init(frame: NSRect(x: 0, y: 0, width: 560, height: 98))
+        identifier = NSUserInterfaceItemIdentifier(profileID)
 
-        let symbol = NSImage(systemSymbolName: ProfileFormatting.providerSymbol(for: profile.provider), accessibilityDescription: profile.provider.rawValue)
-        let icon = NSImageView(image: symbol ?? NSImage())
+        let appIcon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
+        appIcon.size = NSSize(width: 30, height: 30)
+        let icon = NSImageView(image: appIcon)
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        icon.contentTintColor = profile.provider == .claude ? .systemOrange : .systemBlue
+        icon.imageScaling = .scaleProportionallyUpOrDown
 
         let title = NSTextField(labelWithString: ProfileFormatting.title(for: profile))
         title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
         title.lineBreakMode = .byTruncatingMiddle
 
         let subtitle = NSTextField(labelWithString: ProfileFormatting.subtitle(for: profile))
         subtitle.translatesAutoresizingMaskIntoConstraints = false
-        subtitle.font = .systemFont(ofSize: 11)
+        subtitle.font = .systemFont(ofSize: 11.5)
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingTail
 
-        let detail = NSTextField(labelWithString: ProfileFormatting.detail(for: profile, isRefreshing: isRefreshing))
-        detail.translatesAutoresizingMaskIntoConstraints = false
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .tertiaryLabelColor
-        detail.lineBreakMode = .byTruncatingTail
+        let usageLabels = ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).map { line -> NSTextField in
+            let label = NSTextField(labelWithString: line)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.font = .monospacedDigitSystemFont(ofSize: 11.2, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            return label
+        }
+
+        let usageStack = NSStackView(views: usageLabels)
+        usageStack.translatesAutoresizingMaskIntoConstraints = false
+        usageStack.orientation = .vertical
+        usageStack.spacing = 1
+        usageStack.alignment = .leading
 
         let bar = UsageBarView()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.usedPercent = ProfileFormatting.primaryUsagePercent(for: profile)
 
-        let textStack = NSStackView(views: [title, subtitle, detail, bar])
+        let textStack = NSStackView(views: [title, subtitle, usageStack, bar])
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.orientation = .vertical
         textStack.spacing = 3
         textStack.alignment = .leading
 
-        let openButton = NSButton(title: "", target: target, action: action)
         openButton.translatesAutoresizingMaskIntoConstraints = false
         openButton.identifier = NSUserInterfaceItemIdentifier(profileID)
-        openButton.bezelStyle = .texturedRounded
+        openButton.target = self
+        openButton.action = #selector(performOpen(_:))
+        openButton.bezelStyle = .rounded
         openButton.toolTip = "Open \(profile.label)"
-        if let openImage = NSImage(systemSymbolName: "arrow.up.forward.app", accessibilityDescription: "Open") {
+        if let openImage = NSImage(systemSymbolName: "arrow.up.forward.square", accessibilityDescription: "Open") {
             openButton.image = openImage
             openButton.imagePosition = .imageOnly
         } else {
@@ -2422,23 +2474,36 @@ final class ProfileMenuItemView: NSView {
         addSubview(openButton)
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            icon.topAnchor.constraint(equalTo: topAnchor, constant: 15),
-            icon.widthAnchor.constraint(equalToConstant: 22),
-            icon.heightAnchor.constraint(equalToConstant: 22),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            icon.widthAnchor.constraint(equalToConstant: 30),
+            icon.heightAnchor.constraint(equalToConstant: 30),
 
-            textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -12),
+            textStack.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -14),
 
-            bar.widthAnchor.constraint(equalToConstant: 126),
+            bar.widthAnchor.constraint(equalToConstant: 180),
             bar.heightAnchor.constraint(equalToConstant: 6),
 
-            openButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            openButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
             openButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             openButton.widthAnchor.constraint(equalToConstant: 34),
-            openButton.heightAnchor.constraint(equalToConstant: 28)
+            openButton.heightAnchor.constraint(equalToConstant: 30)
         ])
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if !openButton.frame.contains(point) {
+            performOpen(self)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    @objc private func performOpen(_ sender: Any?) {
+        _ = (actionTarget as? NSObject)?.perform(action, with: self)
     }
 
     required init?(coder: NSCoder) {
@@ -2510,9 +2575,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.toolTip = "LLM Usage Bar"
     }
 
-    @objc private func openProfileButton(_ sender: NSButton) {
+    @objc private func openProfileButton(_ sender: Any) {
         statusItem.menu?.cancelTracking()
-        guard let id = sender.identifier?.rawValue else { return }
+        let id: String?
+        if let view = sender as? NSView {
+            id = view.identifier?.rawValue
+        } else if let button = sender as? NSButton {
+            id = button.identifier?.rawValue
+        } else {
+            id = nil
+        }
+        guard let id else { return }
         openProfile(id: id)
     }
 
