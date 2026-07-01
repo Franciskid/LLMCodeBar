@@ -1,9 +1,61 @@
 import AppKit
+import CommonCrypto
 import Foundation
+import Security
 
 enum Provider: String, Codable, CaseIterable {
     case claude = "Claude"
     case codex = "Codex"
+}
+
+struct UsageWindow: Codable {
+    var title: String
+    var usedPercent: Double
+    var remainingPercent: Double
+    var resetsAt: Date?
+
+    var displayText: String {
+        let remaining = Int(remainingPercent.rounded())
+        if let resetsAt {
+            return "\(remaining)% left - resets \(Self.shortResetFormatter.string(from: resetsAt))"
+        }
+        return "\(remaining)% left"
+    }
+
+    private static let shortResetFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE HH:mm"
+        return formatter
+    }()
+}
+
+struct UsageInfo: Codable {
+    var source: String
+    var status: String?
+    var windows: [UsageWindow]
+    var creditsRemaining: Double?
+    var accountEmail: String?
+    var accountPlan: String?
+    var updatedAt: Date
+
+    var primaryPercentUsed: Double? {
+        windows.first?.usedPercent
+    }
+
+    var summaryLine: String {
+        if let status, windows.isEmpty, creditsRemaining == nil {
+            return status
+        }
+
+        var parts = windows.prefix(2).map { "\($0.title): \($0.displayText)" }
+        if let creditsRemaining {
+            parts.append(String(format: "%.0f credits", creditsRemaining))
+        }
+        if parts.isEmpty, let status {
+            parts.append(status)
+        }
+        return parts.isEmpty ? "Usage unavailable" : parts.joined(separator: "  ")
+    }
 }
 
 struct LaunchProfile: Codable, Identifiable {
@@ -25,6 +77,7 @@ struct LaunchProfile: Codable, Identifiable {
     var createdAt: Date?
     var scanSignature: String?
     var scanUpdatedAt: Date?
+    var usage: UsageInfo?
 
     static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity, isUserAdded: Bool = false) -> LaunchProfile {
         let account = identity.displayName ?? identity.email ?? "Signed-in account"
@@ -46,7 +99,8 @@ struct LaunchProfile: Codable, Identifiable {
             isPendingLogin: false,
             createdAt: Date(),
             scanSignature: nil,
-            scanUpdatedAt: nil
+            scanUpdatedAt: nil,
+            usage: nil
         )
     }
 
@@ -69,7 +123,8 @@ struct LaunchProfile: Codable, Identifiable {
             isPendingLogin: true,
             createdAt: Date(),
             scanSignature: nil,
-            scanUpdatedAt: nil
+            scanUpdatedAt: nil,
+            usage: nil
         )
     }
 
@@ -161,6 +216,15 @@ final class ConfigStore {
         return config
     }
 
+    func loadCached() -> AppConfig {
+        Paths.shared.ensureSupportDirectory()
+        guard let data = try? Data(contentsOf: Paths.shared.configURL),
+              let existing = try? decoder.decode(AppConfig.self, from: data) else {
+            return AppConfig(launchAtLogin: false, profiles: [])
+        }
+        return existing
+    }
+
     func save(_ config: AppConfig) {
         Paths.shared.ensureSupportDirectory()
         if let data = try? encoder.encode(config) {
@@ -196,15 +260,16 @@ final class ConfigStore {
             }
         }
 
-        if fm.fileExists(atPath: codexApp) {
-            [
+        if fm.fileExists(atPath: codexApp) || CodexAuthStore.accountInfo() != nil {
+            let codexDataDirs = [
                 "\(support)/Codex",
                 "\(support)/com.openai.codex"
             ]
-            .forEach { candidate in
-                if fm.fileExists(atPath: candidate) {
-                    candidates.append((.codex, codexApp, candidate, false))
-                }
+            for candidate in codexDataDirs where fm.fileExists(atPath: candidate) {
+                candidates.append((.codex, codexApp, candidate, false))
+            }
+            if CodexAuthStore.accountInfo() != nil, !codexDataDirs.contains(where: fm.fileExists(atPath:)) {
+                candidates.append((.codex, codexApp, "\(support)/Codex", false))
             }
         }
 
@@ -218,7 +283,16 @@ final class ConfigStore {
             var profile = existingByKey[key]
             let signature = AccountResolver.signature(in: candidate.dataDir)
             let recentlyScanned = profile?.scanUpdatedAt.map { Date().timeIntervalSince($0) < 300 } ?? false
-            let needsScan = profile == nil || profile?.isPendingLogin == true || (profile?.scanSignature != signature && !recentlyScanned)
+            let missingIdentity = profile.map { existing in
+                existing.signedIn != true ||
+                    existing.accountEmail == nil ||
+                    existing.accountPlan == nil ||
+                    (candidate.provider == .codex && existing.accountUUID == nil)
+            } ?? true
+            let needsScan = profile == nil ||
+                profile?.isPendingLogin == true ||
+                missingIdentity ||
+                (profile?.scanSignature != signature && !recentlyScanned)
             let identity = needsScan ? AccountResolver.identity(in: candidate.dataDir, provider: candidate.provider) : nil
 
             if var existingProfile = profile {
@@ -252,12 +326,7 @@ final class ConfigStore {
             }
         }
 
-        return resultsByKey.values.sorted { lhs, rhs in
-            if lhs.provider.rawValue != rhs.provider.rawValue {
-                return lhs.provider.rawValue < rhs.provider.rawValue
-            }
-            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
-        }
+        return deduplicated(resultsByKey.values)
     }
 
     func createPendingProfile(provider: Provider) -> LaunchProfile {
@@ -309,6 +378,63 @@ final class ConfigStore {
     private func profileKey(provider: Provider, dataDir: String) -> String {
         "\(provider.rawValue)|\(Launcher.expanding(dataDir))"
     }
+
+    private func deduplicated(_ profiles: Dictionary<String, LaunchProfile>.Values) -> [LaunchProfile] {
+        var uniqueByAccount: [String: LaunchProfile] = [:]
+        var anonymous: [LaunchProfile] = []
+
+        for profile in profiles {
+            guard let key = accountKey(for: profile) else {
+                anonymous.append(profile)
+                continue
+            }
+
+            if let existing = uniqueByAccount[key] {
+                uniqueByAccount[key] = preferredProfile(existing, profile)
+            } else {
+                uniqueByAccount[key] = profile
+            }
+        }
+
+        return (Array(uniqueByAccount.values) + anonymous).sorted(by: sortProfiles)
+    }
+
+    private func accountKey(for profile: LaunchProfile) -> String? {
+        guard profile.isPendingLogin != true else { return nil }
+        if let accountUUID = profile.accountUUID?.lowercased(), !accountUUID.isEmpty {
+            return "\(profile.provider.rawValue)|uuid|\(accountUUID)"
+        }
+        if let email = profile.accountEmail?.lowercased(), !email.isEmpty {
+            return "\(profile.provider.rawValue)|email|\(email)"
+        }
+        return nil
+    }
+
+    private func preferredProfile(_ lhs: LaunchProfile, _ rhs: LaunchProfile) -> LaunchProfile {
+        profileScore(rhs) > profileScore(lhs) ? rhs : lhs
+    }
+
+    private func profileScore(_ profile: LaunchProfile) -> Int {
+        var score = 0
+        if profile.isPendingLogin != true { score += 1000 }
+        if profile.signedIn == true { score += 100 }
+        if profile.accountEmail != nil { score += 60 }
+        if profile.accountPlan != nil { score += 40 }
+        if profile.accountUUID != nil { score += 30 }
+        if profile.usage != nil { score += 15 }
+        if profile.isUserAdded == true { score += 8 }
+        if profile.scanSignature?.isEmpty == false { score += 6 }
+        if profile.dataDir.contains("/Library/Application Support/Codex") { score += 3 }
+        if profile.dataDir.contains("/Library/Application Support/com.openai.codex") { score -= 2 }
+        return score
+    }
+
+    private func sortProfiles(_ lhs: LaunchProfile, _ rhs: LaunchProfile) -> Bool {
+        if lhs.provider.rawValue != rhs.provider.rawValue {
+            return lhs.provider.rawValue < rhs.provider.rawValue
+        }
+        return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+    }
 }
 
 enum AccountResolver {
@@ -326,6 +452,19 @@ enum AccountResolver {
     }
 
     static func identity(in dataDir: String, provider: Provider) -> AccountIdentity? {
+        if provider == .codex, let account = CodexAuthStore.accountInfo(dataDir: dataDir) {
+            return AccountIdentity(
+                displayName: nil,
+                email: account.email,
+                isSignedIn: true,
+                planName: account.plan,
+                quotaSummary: nil,
+                quotaSource: nil,
+                billingType: nil,
+                accountUUID: account.accountID
+            )
+        }
+
         let root = URL(fileURLWithPath: Launcher.expanding(dataDir))
         let files = relevantFiles(under: root)
         var emails: [String] = []
@@ -345,6 +484,9 @@ enum AccountResolver {
             }
             if text.contains("\"billing_type\"") {
                 billingTypes.append(contentsOf: captureMatches(pattern: #""billing_type"\s*:\s*"([^"]+)""#, in: text))
+                if text.range(of: #""billing_type"\s*:\s*null"#, options: [.regularExpression, .caseInsensitive]) != nil {
+                    billingTypes.append("none")
+                }
             }
             if text.contains("\"account_uuid\"") {
                 accountUUIDs.append(contentsOf: captureMatches(pattern: #""account_uuid"\s*:\s*"([^"]+)""#, in: text))
@@ -615,15 +757,18 @@ enum AccountResolver {
     private static func planName(provider: Provider, billingType: String?, planSignals: [String]) -> String? {
         if let explicitPlan = planSignals.first(where: { signal in
             let lower = signal.lowercased()
-            return lower.contains("pro") || lower.contains("max") || lower.contains("team") || lower.contains("plus")
+            return ["max", "pro", "team", "plus", "free"].contains(lower)
         }) {
-            return explicitPlan
+            return displayPlan(explicitPlan)
         }
 
         switch provider {
         case .claude:
             if billingType == "stripe_subscription" {
                 return "Paid subscription"
+            }
+            if billingType == "none" {
+                return "Free"
             }
         case .codex:
             return nil
@@ -635,15 +780,29 @@ enum AccountResolver {
     private static func planSignalsFrom(text: String) -> [String] {
         var signals: [String] = []
         let patterns = [
-            #""billing_type"\s*:\s*"([^"]+)""#,
-            #""(?:membership|plan|subscription|billing_plan|account_plan)"\s*:?\s*"?([^",}\]]{1,120})"?"#
+            #""(?:plan|subscription_tier|tier|billing_plan|account_plan|membership)"\s*:\s*"(max|pro|team|plus|free)""#,
+            #""(?:plan|subscription|membership)"[^"}]{0,140}"(max|pro|team|plus|free)""#,
+            #"billing_type[^\n\r]{0,260}_?(max|pro|team|plus|free)"#,
+            #"stripe_subscrip[^\n\r]{0,180}_?(max|pro|team|plus|free)"#,
+            #""billing_type"\s*:\s*"([^"]+)""#
         ]
 
         for pattern in patterns {
-            signals.append(contentsOf: captureMatches(pattern: pattern, in: text))
+            signals.append(contentsOf: captureMatches(pattern: pattern, in: text).map { $0.lowercased() })
         }
 
         return Array(Set(signals))
+    }
+
+    private static func displayPlan(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "max": return "Max"
+        case "pro": return "Pro"
+        case "team": return "Team"
+        case "plus": return "Plus"
+        case "free": return "Free"
+        default: return raw
+        }
     }
 
     private static func looksLikeHumanName(_ value: String) -> Bool {
@@ -687,6 +846,791 @@ enum AccountResolver {
     }
 }
 
+struct HTTPResponse {
+    var statusCode: Int
+    var data: Data
+}
+
+enum SimpleHTTP {
+    static func get(_ url: URL, headers: [String: String], timeout: TimeInterval = 8) throws -> HTTPResponse {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeout
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        return try perform(request)
+    }
+
+    static func postJSON(_ url: URL, body: [String: String], headers: [String: String], timeout: TimeInterval = 8) throws -> HTTPResponse {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        return try perform(request)
+    }
+
+    private static func perform(_ request: URLRequest) throws -> HTTPResponse {
+        let semaphore = DispatchSemaphore(value: 0)
+        var output: Result<HTTPResponse, Error>!
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            if let error {
+                output = .failure(error)
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                output = .failure(NSError(domain: "LLMUsageBar.HTTP", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"]))
+                return
+            }
+            output = .success(HTTPResponse(statusCode: http.statusCode, data: data ?? Data()))
+        }.resume()
+        semaphore.wait()
+        return try output.get()
+    }
+}
+
+enum ProcessRunner {
+    static func run(_ executable: String, arguments: [String], environment: [String: String]? = nil, timeout: TimeInterval = 5) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
+
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if process.isRunning {
+            process.terminate()
+            throw NSError(domain: "LLMUsageBar.Process", code: -2, userInfo: [NSLocalizedDescriptionKey: "\(executable) timed out"])
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        if process.terminationStatus != 0 {
+            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw NSError(domain: "LLMUsageBar.Process", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "\(executable) failed" : stderr])
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
+enum ElectronCookieReader {
+    struct Cookie {
+        var host: String
+        var name: String
+        var value: String
+    }
+
+    static func cookieHeader(from dataDir: String, domains: [String], keychainServices: [String]) throws -> String {
+        let cookieURL = URL(fileURLWithPath: Launcher.expanding(dataDir)).appendingPathComponent("Cookies")
+        guard FileManager.default.fileExists(atPath: cookieURL.path) else {
+            throw NSError(domain: "LLMUsageBar.Cookies", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cookie database not found"])
+        }
+
+        let domainPredicate = domains.map { "host_key like '%\($0.replacingOccurrences(of: "'", with: "''"))'" }.joined(separator: " or ")
+        let sql = "select host_key,name,value,hex(encrypted_value) from cookies where \(domainPredicate) order by host_key,name;"
+        let output = try ProcessRunner.run(
+            "/usr/bin/sqlite3",
+            arguments: ["-separator", "\t", cookieURL.path, sql],
+            timeout: 5)
+
+        let passphrase = keychainServices.compactMap(keychainPassword(service:)).first
+        let cookies = output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> Cookie? in
+                let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count >= 4 else { return nil }
+                let host = parts[0]
+                let name = parts[1]
+                let plain = parts[2]
+                let encryptedHex = parts[3]
+                let value: String?
+                if !plain.isEmpty {
+                    value = plain
+                } else if let passphrase, let encrypted = Data(hexString: encryptedHex) {
+                    value = decryptChromiumCookie(encrypted, passphrase: passphrase)
+                } else {
+                    value = nil
+                }
+                guard let value, !value.isEmpty else { return nil }
+                return Cookie(host: host, name: name, value: value)
+            }
+
+        guard !cookies.isEmpty else {
+            throw NSError(domain: "LLMUsageBar.Cookies", code: 2, userInfo: [NSLocalizedDescriptionKey: "No readable cookies found"])
+        }
+        return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    private static func keychainPassword(service: String) -> String? {
+        for account in keychainAccountCandidates(for: service) {
+            if let password = modernKeychainPassword(service: service, account: account) {
+                return password
+            }
+            if let password = legacyKeychainPassword(service: service, account: account) {
+                return password
+            }
+        }
+        return nil
+    }
+
+    private static func keychainAccountCandidates(for service: String) -> [String?] {
+        let guessed = service
+            .replacingOccurrences(of: " Safe Storage", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates: [String?] = guessed.isEmpty ? [] : [guessed]
+        candidates.append(nil)
+        return candidates
+    }
+
+    private static func modernKeychainPassword(service: String, account: String?) -> String? {
+        for useDataProtectionKeychain in [false, true] {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnData as String: kCFBooleanTrue as Any,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            if useDataProtectionKeychain {
+                query[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue as Any
+            }
+            if let account {
+                query[kSecAttrAccount as String] = account
+            }
+
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            if status == errSecSuccess,
+               let data = item as? Data,
+               let password = String(data: data, encoding: .utf8),
+               !password.isEmpty {
+                return password
+            }
+        }
+        return nil
+    }
+
+    private static func legacyKeychainPassword(service: String, account: String?) -> String? {
+        var length: UInt32 = 0
+        var passwordData: UnsafeMutableRawPointer?
+
+        let status: OSStatus = service.withCString { servicePointer in
+            if let account {
+                return account.withCString { accountPointer in
+                    SecKeychainFindGenericPassword(
+                        nil,
+                        UInt32(strlen(servicePointer)),
+                        servicePointer,
+                        UInt32(strlen(accountPointer)),
+                        accountPointer,
+                        &length,
+                        &passwordData,
+                        nil)
+                }
+            }
+
+            return SecKeychainFindGenericPassword(
+                nil,
+                UInt32(strlen(servicePointer)),
+                servicePointer,
+                0,
+                nil,
+                &length,
+                &passwordData,
+                nil)
+        }
+        guard status == errSecSuccess, let passwordData else { return nil }
+        defer { SecKeychainItemFreeContent(nil, passwordData) }
+        return String(data: Data(bytes: passwordData, count: Int(length)), encoding: .utf8)
+    }
+
+    private static func decryptChromiumCookie(_ encrypted: Data, passphrase: String) -> String? {
+        guard encrypted.count > 3 else { return nil }
+        let prefix = String(data: encrypted.prefix(3), encoding: .utf8)
+        let cipher = (prefix == "v10" || prefix == "v11") ? Data(encrypted.dropFirst(3)) : encrypted
+        let salt = Array("saltysalt".utf8)
+        let iv = Array(repeating: UInt8(ascii: " "), count: kCCBlockSizeAES128)
+        var key = Array(repeating: UInt8(0), count: kCCKeySizeAES128)
+        let derivationStatus = passphrase.withCString { password in
+            CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                password,
+                strlen(password),
+                salt,
+                salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                1003,
+                &key,
+                key.count)
+        }
+        guard derivationStatus == kCCSuccess else { return nil }
+
+        var output = Array(repeating: UInt8(0), count: cipher.count + kCCBlockSizeAES128)
+        let outputCapacity = output.count
+        var outputLength = 0
+        let cryptStatus = cipher.withUnsafeBytes { cipherBytes in
+            key.withUnsafeBytes { keyBytes in
+                iv.withUnsafeBytes { ivBytes in
+                    output.withUnsafeMutableBytes { outputBytes in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            cipherBytes.baseAddress,
+                            cipher.count,
+                            outputBytes.baseAddress,
+                            outputCapacity,
+                            &outputLength)
+                    }
+                }
+            }
+        }
+        guard cryptStatus == kCCSuccess else { return nil }
+        let decrypted = Data(output.prefix(outputLength))
+        if let text = readableCookieValue(from: decrypted) {
+            return text
+        }
+        if decrypted.count > 32 {
+            return readableCookieValue(from: Data(decrypted.dropFirst(32)))
+        }
+        return nil
+    }
+
+    private static func readableCookieValue(from data: Data) -> String? {
+        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+            return nil
+        }
+        let hasControlCharacters = value.unicodeScalars.contains { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7f
+        }
+        return hasControlCharacters ? nil : value
+    }
+}
+
+enum ClaudeCDPCookieReader {
+    static func cookieHeader(from dataDir: String) -> String? {
+        let portFile = URL(fileURLWithPath: Launcher.expanding(dataDir), isDirectory: true)
+            .appendingPathComponent("DevToolsActivePort")
+        guard let contents = try? String(contentsOf: portFile, encoding: .utf8),
+              let portLine = contents.split(whereSeparator: \.isNewline).first,
+              let port = Int(portLine) else {
+            return nil
+        }
+
+        guard let targetsURL = URL(string: "http://127.0.0.1:\(port)/json"),
+              let response = try? SimpleHTTP.get(targetsURL, headers: [:], timeout: 1),
+              response.statusCode == 200,
+              let targets = try? JSONSerialization.jsonObject(with: response.data) as? [[String: Any]] else {
+            return nil
+        }
+
+        let webSocketURLString = targets.compactMap { target -> String? in
+            guard let ws = target["webSocketDebuggerUrl"] as? String else { return nil }
+            let url = (target["url"] as? String) ?? ""
+            return url.contains("claude.ai") ? ws : nil
+        }.first ?? targets.compactMap { $0["webSocketDebuggerUrl"] as? String }.first
+
+        guard let webSocketURLString,
+              let webSocketURL = URL(string: webSocketURLString),
+              let cookies = fetchCookies(webSocketURL: webSocketURL) else {
+            return nil
+        }
+
+        let claudeCookies = cookies.compactMap { cookie -> String? in
+            guard let domain = cookie["domain"] as? String,
+                  domain.contains("claude.ai"),
+                  let name = cookie["name"] as? String,
+                  let value = cookie["value"] as? String,
+                  !value.isEmpty else {
+                return nil
+            }
+            return "\(name)=\(value)"
+        }
+
+        return claudeCookies.isEmpty ? nil : claudeCookies.joined(separator: "; ")
+    }
+
+    private static func fetchCookies(webSocketURL: URL) -> [[String: Any]]? {
+        let task = URLSession.shared.webSocketTask(with: webSocketURL)
+        let semaphore = DispatchSemaphore(value: 0)
+        var output: [[String: Any]]?
+
+        task.resume()
+        let message = #"{"id":1,"method":"Network.getAllCookies"}"#
+        task.send(.string(message)) { error in
+            if error != nil {
+                semaphore.signal()
+                return
+            }
+
+            task.receive { result in
+                defer { semaphore.signal() }
+                guard case let .success(message) = result else { return }
+
+                let data: Data?
+                switch message {
+                case let .string(text):
+                    data = text.data(using: .utf8)
+                case let .data(raw):
+                    data = raw
+                @unknown default:
+                    data = nil
+                }
+
+                guard let data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let result = json["result"] as? [String: Any],
+                      let cookies = result["cookies"] as? [[String: Any]] else {
+                    return
+                }
+                output = cookies
+            }
+        }
+
+        _ = semaphore.wait(timeout: .now() + 2)
+        task.cancel(with: .normalClosure, reason: nil)
+        return output
+    }
+}
+
+extension Data {
+    init?(hexString: String) {
+        let cleaned = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count % 2 == 0 else { return nil }
+        var bytes: [UInt8] = []
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            let next = cleaned.index(index, offsetBy: 2)
+            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        self = Data(bytes)
+    }
+}
+
+struct CodexAccountInfo {
+    var email: String?
+    var plan: String?
+    var accountID: String?
+}
+
+struct CodexCredentials {
+    var accessToken: String
+    var refreshToken: String?
+    var idToken: String?
+    var accountID: String?
+    var authURL: URL
+}
+
+enum CodexAuthStore {
+    private static let refreshEndpoint = URL(string: "https://auth.openai.com/oauth/token")!
+    private static let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+    static func accountInfo(dataDir: String? = nil) -> CodexAccountInfo? {
+        guard let credentials = try? loadCredentials(dataDir: dataDir) else { return nil }
+        let payload = credentials.idToken.flatMap(parseJWT)
+        let auth = payload?["https://api.openai.com/auth"] as? [String: Any]
+        let profile = payload?["https://api.openai.com/profile"] as? [String: Any]
+        let email = normalized((payload?["email"] as? String) ?? (profile?["email"] as? String))
+        let plan = displayPlan(normalized((auth?["chatgpt_plan_type"] as? String) ?? (payload?["chatgpt_plan_type"] as? String)))
+        let accountID = normalized(credentials.accountID ?? (auth?["chatgpt_account_id"] as? String))
+        return CodexAccountInfo(email: email, plan: plan, accountID: accountID)
+    }
+
+    static func loadCredentials(dataDir: String? = nil) throws -> CodexCredentials {
+        let authURL = authFileCandidates(dataDir: dataDir).first { FileManager.default.fileExists(atPath: $0.path) }
+        guard let authURL else {
+            throw NSError(domain: "LLMUsageBar.CodexAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Codex auth.json not found"])
+        }
+        let data = try Data(contentsOf: authURL)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "LLMUsageBar.CodexAuth", code: 2, userInfo: [NSLocalizedDescriptionKey: "Codex auth.json is invalid"])
+        }
+        if let apiKey = normalized(json["OPENAI_API_KEY"] as? String) {
+            return CodexCredentials(accessToken: apiKey, refreshToken: nil, idToken: nil, accountID: nil, authURL: authURL)
+        }
+        guard let tokens = json["tokens"] as? [String: Any],
+              let access = normalized((tokens["access_token"] as? String) ?? (tokens["accessToken"] as? String)) else {
+            throw NSError(domain: "LLMUsageBar.CodexAuth", code: 3, userInfo: [NSLocalizedDescriptionKey: "Codex auth.json has no access token"])
+        }
+        let idToken = normalized((tokens["id_token"] as? String) ?? (tokens["idToken"] as? String))
+        let payload = idToken.flatMap(parseJWT)
+        let auth = payload?["https://api.openai.com/auth"] as? [String: Any]
+        let accountID = normalized((tokens["account_id"] as? String) ?? (tokens["accountId"] as? String)) ??
+            normalized(auth?["chatgpt_account_id"] as? String)
+        return CodexCredentials(
+            accessToken: access,
+            refreshToken: normalized((tokens["refresh_token"] as? String) ?? (tokens["refreshToken"] as? String)),
+            idToken: idToken,
+            accountID: accountID,
+            authURL: authURL)
+    }
+
+    static func refreshCredentials(_ credentials: CodexCredentials) throws -> CodexCredentials {
+        guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
+            return credentials
+        }
+
+        let response = try SimpleHTTP.postJSON(
+            refreshEndpoint,
+            body: [
+                "client_id": oauthClientID,
+                "grant_type": "refresh_token",
+                "refresh_token": refreshToken,
+                "scope": "openid profile email",
+            ],
+            headers: [:])
+        guard response.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+            throw NSError(domain: "LLMUsageBar.CodexAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Codex token refresh HTTP \(response.statusCode)"])
+        }
+
+        let refreshed = CodexCredentials(
+            accessToken: normalized(json["access_token"] as? String) ?? credentials.accessToken,
+            refreshToken: normalized(json["refresh_token"] as? String) ?? credentials.refreshToken,
+            idToken: normalized(json["id_token"] as? String) ?? credentials.idToken,
+            accountID: credentials.accountID,
+            authURL: credentials.authURL)
+        try? saveCredentials(refreshed)
+        return refreshed
+    }
+
+    private static func saveCredentials(_ credentials: CodexCredentials) throws {
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: credentials.authURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+
+        var tokens: [String: Any] = [
+            "access_token": credentials.accessToken
+        ]
+        if let refreshToken = credentials.refreshToken {
+            tokens["refresh_token"] = refreshToken
+        }
+        if let idToken = credentials.idToken {
+            tokens["id_token"] = idToken
+        }
+        if let accountID = credentials.accountID {
+            tokens["account_id"] = accountID
+        }
+        json["tokens"] = tokens
+        json["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try FileManager.default.createDirectory(at: credentials.authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: credentials.authURL, options: [.atomic])
+    }
+
+    static func parseJWT(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 {
+            payload.append("=")
+        }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    static func displayPlan(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        switch raw.lowercased() {
+        case "plus": return "Plus"
+        case "pro": return "Pro"
+        case "team": return "Team"
+        case "enterprise": return "Enterprise"
+        case "free": return "Free"
+        case "go": return "Go"
+        default: return raw
+        }
+    }
+
+    private static func authFileCandidates(dataDir: String?) -> [URL] {
+        var urls: [URL] = []
+        if let dataDir {
+            let root = URL(fileURLWithPath: Launcher.expanding(dataDir), isDirectory: true)
+            urls.append(root.appendingPathComponent("CodexHome/auth.json"))
+            urls.append(root.appendingPathComponent("auth.json"))
+        }
+        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"], !codexHome.isEmpty {
+            urls.append(URL(fileURLWithPath: codexHome, isDirectory: true).appendingPathComponent("auth.json"))
+        }
+        urls.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json"))
+        return urls
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+enum UsageRefresher {
+    static func refresh(_ config: AppConfig) -> AppConfig {
+        var updated = config
+        let profiles = updated.profiles
+        var refreshed = Array<LaunchProfile?>(repeating: nil, count: profiles.count)
+        let lock = NSLock()
+
+        DispatchQueue.concurrentPerform(iterations: profiles.count) { index in
+            var profile = profiles[index]
+            switch profile.provider {
+            case .claude:
+                profile = refreshClaude(profile)
+            case .codex:
+                profile = refreshCodex(profile)
+            }
+            lock.lock()
+            refreshed[index] = profile
+            lock.unlock()
+        }
+
+        for index in refreshed.indices {
+            if let profile = refreshed[index] {
+                updated.profiles[index] = profile
+            }
+        }
+        return updated
+    }
+
+    private static func refreshClaude(_ profile: LaunchProfile) -> LaunchProfile {
+        var profile = profile
+        do {
+            let cookieHeader = try ClaudeCDPCookieReader.cookieHeader(from: profile.dataDir) ??
+                ElectronCookieReader.cookieHeader(
+                    from: profile.dataDir,
+                    domains: ["claude.ai"],
+                    keychainServices: [
+                        "Chromium Safe Storage",
+                        "Claude Safe Storage",
+                        "Chrome Safe Storage",
+                        "Brave Safe Storage",
+                        "Microsoft Edge Safe Storage",
+                        "Arc Safe Storage",
+                    ])
+            let orgID = try claudeOrganizationID(cookieHeader: cookieHeader)
+            let usage = try claudeUsage(cookieHeader: cookieHeader, orgID: orgID, profile: profile)
+            profile.usage = usage
+            if let email = usage.accountEmail {
+                profile.accountEmail = email
+                profile.label = "\(profile.provider.rawValue) - \(email)"
+                profile.signedIn = true
+            }
+            if let plan = usage.accountPlan {
+                profile.accountPlan = plan
+            }
+        } catch {
+            profile.usage = UsageInfo(
+                source: "claude-web",
+                status: error.localizedDescription,
+                windows: [],
+                creditsRemaining: nil,
+                accountEmail: profile.accountEmail,
+                accountPlan: profile.accountPlan,
+                updatedAt: Date())
+        }
+        return profile
+    }
+
+    private static func refreshCodex(_ profile: LaunchProfile) -> LaunchProfile {
+        var profile = profile
+        let account = CodexAuthStore.accountInfo(dataDir: profile.dataDir)
+        if let email = account?.email {
+            profile.accountEmail = email
+            profile.label = "\(profile.provider.rawValue) - \(email)"
+            profile.signedIn = true
+        }
+        if let plan = account?.plan {
+            profile.accountPlan = plan
+        }
+        if let accountID = account?.accountID {
+            profile.accountUUID = accountID
+        }
+
+        do {
+            let usage = try codexUsage(profile: profile)
+            profile.usage = usage
+            if let email = usage.accountEmail {
+                profile.accountEmail = email
+                profile.label = "\(profile.provider.rawValue) - \(email)"
+            }
+            if let plan = usage.accountPlan {
+                profile.accountPlan = plan
+            }
+        } catch {
+            profile.usage = UsageInfo(
+                source: "codex-oauth",
+                status: error.localizedDescription,
+                windows: [],
+                creditsRemaining: nil,
+                accountEmail: profile.accountEmail,
+                accountPlan: profile.accountPlan,
+                updatedAt: Date())
+        }
+        return profile
+    }
+
+    private static func claudeOrganizationID(cookieHeader: String) throws -> String {
+        if let direct = cookieValue("lastActiveOrg", in: cookieHeader) {
+            return direct
+        }
+        let response = try SimpleHTTP.get(
+            URL(string: "https://claude.ai/api/bootstrap")!,
+            headers: claudeHeaders(cookieHeader: cookieHeader))
+        guard response.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let account = json["account"] as? [String: Any],
+              let org = account["lastActiveOrgId"] as? String else {
+            throw NSError(domain: "LLMUsageBar.Claude", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Claude organization unavailable"])
+        }
+        return org
+    }
+
+    private static func claudeUsage(cookieHeader: String, orgID: String, profile: LaunchProfile) throws -> UsageInfo {
+        let response = try SimpleHTTP.get(
+            URL(string: "https://claude.ai/api/organizations/\(orgID)/usage")!,
+            headers: claudeHeaders(cookieHeader: cookieHeader))
+        guard response.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+            throw NSError(domain: "LLMUsageBar.Claude", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Claude usage HTTP \(response.statusCode)"])
+        }
+
+        var windows: [UsageWindow] = []
+        appendClaudeWindow(key: "five_hour", title: "5h", json: json, windows: &windows)
+        appendClaudeWindow(key: "seven_day", title: "Week", json: json, windows: &windows)
+        appendClaudeWindow(key: "seven_day_sonnet", title: "Sonnet week", json: json, windows: &windows)
+
+        return UsageInfo(
+            source: "claude-web",
+            status: windows.isEmpty ? "Claude usage unavailable" : nil,
+            windows: windows,
+            creditsRemaining: nil,
+            accountEmail: profile.accountEmail,
+            accountPlan: profile.accountPlan,
+            updatedAt: Date())
+    }
+
+    private static func appendClaudeWindow(key: String, title: String, json: [String: Any], windows: inout [UsageWindow]) {
+        guard let block = json[key] as? [String: Any],
+              let used = flexibleDouble(block["utilization"]) else { return }
+        windows.append(UsageWindow(
+            title: title,
+            usedPercent: max(0, min(100, used)),
+            remainingPercent: max(0, min(100, 100 - used)),
+            resetsAt: (block["resets_at"] as? String).flatMap(parseISODate)))
+    }
+
+    private static func claudeHeaders(cookieHeader: String) -> [String: String] {
+        [
+            "Cookie": cookieHeader,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://claude.ai",
+            "Referer": "https://claude.ai",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) LLMUsageBar",
+        ]
+    }
+
+    private static func codexUsage(profile: LaunchProfile) throws -> UsageInfo {
+        var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
+        var response = try codexUsageResponse(credentials: credentials)
+        if response.statusCode == 401 || response.statusCode == 403 {
+            credentials = try CodexAuthStore.refreshCredentials(credentials)
+            response = try codexUsageResponse(credentials: credentials)
+        }
+        guard (200...299).contains(response.statusCode),
+              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+            throw NSError(domain: "LLMUsageBar.Codex", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Codex usage HTTP \(response.statusCode)"])
+        }
+
+        let account = CodexAuthStore.accountInfo(dataDir: profile.dataDir)
+        let plan = CodexAuthStore.displayPlan((json["plan_type"] as? String) ?? account?.plan)
+        let rateLimit = json["rate_limit"] as? [String: Any]
+        var windows: [UsageWindow] = []
+        appendCodexWindow(rateLimit?["primary_window"], title: "5h", windows: &windows)
+        appendCodexWindow(rateLimit?["secondary_window"], title: "Week", windows: &windows)
+
+        let credits = json["credits"] as? [String: Any]
+        let balance = flexibleDouble(credits?["balance"])
+
+        return UsageInfo(
+            source: "codex-oauth",
+            status: windows.isEmpty && balance == nil ? "Codex usage unavailable" : nil,
+            windows: windows,
+            creditsRemaining: balance,
+            accountEmail: account?.email,
+            accountPlan: plan,
+            updatedAt: Date())
+    }
+
+    private static func codexUsageResponse(credentials: CodexCredentials) throws -> HTTPResponse {
+        var headers = [
+            "Authorization": "Bearer \(credentials.accessToken)",
+            "Accept": "application/json",
+            "User-Agent": "LLMUsageBar",
+        ]
+        if let accountID = credentials.accountID {
+            headers["ChatGPT-Account-Id"] = accountID
+        }
+        return try SimpleHTTP.get(
+            URL(string: "https://chatgpt.com/backend-api/wham/usage")!,
+            headers: headers)
+    }
+
+    private static func appendCodexWindow(_ raw: Any?, title: String, windows: inout [UsageWindow]) {
+        guard let block = raw as? [String: Any],
+              let used = flexibleDouble(block["used_percent"]) else { return }
+        let resetSeconds = flexibleDouble(block["reset_at"])
+        windows.append(UsageWindow(
+            title: title,
+            usedPercent: max(0, min(100, used)),
+            remainingPercent: max(0, min(100, 100 - used)),
+            resetsAt: resetSeconds.map { Date(timeIntervalSince1970: $0) }))
+    }
+
+    private static func cookieValue(_ name: String, in header: String) -> String? {
+        header.split(separator: ";").compactMap { part -> String? in
+            let pieces = part.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1)
+            guard pieces.count == 2, pieces[0] == name else { return nil }
+            return String(pieces[1])
+        }.first
+    }
+
+    private static func flexibleDouble(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? String { return Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    private static func parseISODate(_ raw: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return fractional.date(from: raw) ?? plain.date(from: raw)
+    }
+}
+
 enum AutostartManager {
     static func sync(enabled: Bool) {
         if enabled {
@@ -727,13 +1671,36 @@ enum Launcher {
         let appURL = URL(fileURLWithPath: expanding(profile.appPath))
         let dataDir = expanding(profile.dataDir)
 
+        guard fm.fileExists(atPath: appURL.path) else {
+            throw NSError(domain: "LLMUsageBar.Launcher", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(profile.provider.rawValue) app not found at \(appURL.path)"])
+        }
+
         try fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-n", "-a", appURL.path, "--args", "--user-data-dir=\(dataDir)"]
-        process.environment = ProcessInfo.processInfo.environment
-        try process.run()
+        var environment = ProcessInfo.processInfo.environment
+        if profile.provider == .codex {
+            let codexHome = URL(fileURLWithPath: dataDir, isDirectory: true)
+                .appendingPathComponent("CodexHome", isDirectory: true)
+            try fm.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            environment["CODEX_HOME"] = codexHome.path
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        var arguments = ["--user-data-dir=\(dataDir)"]
+        if profile.provider == .claude {
+            arguments.append("--remote-debugging-address=127.0.0.1")
+            arguments.append("--remote-debugging-port=0")
+        }
+        configuration.arguments = arguments
+        configuration.environment = environment
+
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            if let error {
+                NSLog("LLM Usage Bar launch failed for %@: %@", profile.label, error.localizedDescription)
+            }
+        }
     }
 
     static func expanding(_ path: String) -> String {
@@ -1037,95 +2004,307 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 }
 
+enum ProfileFormatting {
+    static func title(for profile: LaunchProfile) -> String {
+        if profile.isPendingLogin == true {
+            return "Connect account"
+        }
+        if let email = profile.accountEmail {
+            return email
+        }
+        if let name = profile.accountName {
+            return name
+        }
+        return profile.signedIn == true ? "Signed-in account" : "Not signed in"
+    }
+
+    static func subtitle(for profile: LaunchProfile) -> String {
+        var parts = [profile.provider.rawValue]
+        if let plan = profile.usage?.accountPlan ?? profile.accountPlan {
+            parts.append(plan)
+        } else if profile.signedIn == true {
+            parts.append("Subscription unknown")
+        }
+        if let updatedAt = profile.usage?.updatedAt {
+            parts.append("Updated \(relativeFormatter.localizedString(for: updatedAt, relativeTo: Date()))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func detail(for profile: LaunchProfile, isRefreshing: Bool) -> String {
+        if let usage = profile.usage {
+            return usage.summaryLine
+        }
+        if profile.isPendingLogin == true {
+            return "Waiting for login in the isolated profile"
+        }
+        return isRefreshing ? "Checking account and quota..." : "Usage not refreshed yet"
+    }
+
+    static func primaryUsagePercent(for profile: LaunchProfile) -> Double? {
+        profile.usage?.primaryPercentUsed
+    }
+
+    static func bestUsagePercent(in profiles: [LaunchProfile]) -> Double? {
+        profiles.compactMap(primaryUsagePercent(for:)).max()
+    }
+
+    static func providerSymbol(for provider: Provider) -> String {
+        switch provider {
+        case .claude: return "sparkles"
+        case .codex: return "terminal"
+        }
+    }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+}
+
+enum MenuBarIcon {
+    static func make(usagePercent: Double?, isRefreshing: Bool) -> NSImage {
+        let size = NSSize(width: 24, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        let accent = isRefreshing ? NSColor.systemBlue : color(for: usagePercent)
+        let stroke = NSColor.labelColor.withAlphaComponent(0.92)
+        let lineWidth: CGFloat = 1.6
+        let nodes = [
+            NSPoint(x: 5, y: 9),
+            NSPoint(x: 11, y: 14),
+            NSPoint(x: 18, y: 11),
+            NSPoint(x: 14, y: 4),
+            NSPoint(x: 7, y: 3)
+        ]
+
+        stroke.setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = lineWidth
+        path.move(to: nodes[0])
+        path.line(to: nodes[1])
+        path.line(to: nodes[2])
+        path.line(to: nodes[3])
+        path.line(to: nodes[4])
+        path.line(to: nodes[0])
+        path.move(to: nodes[1])
+        path.line(to: nodes[3])
+        path.stroke()
+
+        for (index, node) in nodes.enumerated() {
+            let radius: CGFloat = index == 1 ? 2.4 : 2.0
+            let rect = NSRect(x: node.x - radius, y: node.y - radius, width: radius * 2, height: radius * 2)
+            (index == 1 ? accent : stroke).setFill()
+            NSBezierPath(ovalIn: rect).fill()
+        }
+
+        if let usagePercent {
+            let remaining = max(0, min(1, (100 - usagePercent) / 100))
+            let barRect = NSRect(x: 21, y: 3, width: 2, height: 12)
+            NSColor.labelColor.withAlphaComponent(0.18).setFill()
+            NSBezierPath(roundedRect: barRect, xRadius: 1, yRadius: 1).fill()
+            accent.setFill()
+            let fillHeight = barRect.height * CGFloat(remaining)
+            NSBezierPath(roundedRect: NSRect(x: barRect.minX, y: barRect.minY, width: barRect.width, height: fillHeight), xRadius: 1, yRadius: 1).fill()
+        }
+
+        image.isTemplate = false
+        return image
+    }
+
+    private static func color(for usagePercent: Double?) -> NSColor {
+        guard let usagePercent else { return .systemTeal }
+        if usagePercent >= 90 { return .systemRed }
+        if usagePercent >= 70 { return .systemOrange }
+        return .systemGreen
+    }
+}
+
+final class UsageBarView: NSView {
+    var usedPercent: Double? {
+        didSet { needsDisplay = true }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 124, height: 6)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0, dy: 1)
+        NSColor.separatorColor.withAlphaComponent(0.5).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
+
+        guard let usedPercent else { return }
+        let percent = max(0, min(1, usedPercent / 100))
+        let fillWidth = rect.width * CGFloat(percent)
+        let fillRect = NSRect(x: rect.minX, y: rect.minY, width: fillWidth, height: rect.height)
+        let color: NSColor = usedPercent >= 90 ? .systemRed : (usedPercent >= 70 ? .systemOrange : .systemGreen)
+        color.setFill()
+        NSBezierPath(roundedRect: fillRect, xRadius: 3, yRadius: 3).fill()
+    }
+}
+
+final class ProfileMenuItemView: NSView {
+    private let profileID: String
+
+    init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool) {
+        self.profileID = profile.id
+        super.init(frame: NSRect(x: 0, y: 0, width: 430, height: 82))
+
+        let symbol = NSImage(systemSymbolName: ProfileFormatting.providerSymbol(for: profile.provider), accessibilityDescription: profile.provider.rawValue)
+        let icon = NSImageView(image: symbol ?? NSImage())
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        icon.contentTintColor = profile.provider == .claude ? .systemOrange : .systemBlue
+
+        let title = NSTextField(labelWithString: ProfileFormatting.title(for: profile))
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        title.lineBreakMode = .byTruncatingMiddle
+
+        let subtitle = NSTextField(labelWithString: ProfileFormatting.subtitle(for: profile))
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+        subtitle.font = .systemFont(ofSize: 11)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.lineBreakMode = .byTruncatingTail
+
+        let detail = NSTextField(labelWithString: ProfileFormatting.detail(for: profile, isRefreshing: isRefreshing))
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .tertiaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+
+        let bar = UsageBarView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.usedPercent = ProfileFormatting.primaryUsagePercent(for: profile)
+
+        let textStack = NSStackView(views: [title, subtitle, detail, bar])
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.orientation = .vertical
+        textStack.spacing = 3
+        textStack.alignment = .leading
+
+        let openButton = NSButton(title: "", target: target, action: action)
+        openButton.translatesAutoresizingMaskIntoConstraints = false
+        openButton.identifier = NSUserInterfaceItemIdentifier(profileID)
+        openButton.bezelStyle = .texturedRounded
+        openButton.toolTip = "Open \(profile.label)"
+        if let openImage = NSImage(systemSymbolName: "arrow.up.forward.app", accessibilityDescription: "Open") {
+            openButton.image = openImage
+            openButton.imagePosition = .imageOnly
+        } else {
+            openButton.title = "Open"
+        }
+
+        addSubview(icon)
+        addSubview(textStack)
+        addSubview(openButton)
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: 15),
+            icon.widthAnchor.constraint(equalToConstant: 22),
+            icon.heightAnchor.constraint(equalToConstant: 22),
+
+            textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -12),
+
+            bar.widthAnchor.constraint(equalToConstant: 126),
+            bar.heightAnchor.constraint(equalToConstant: 6),
+
+            openButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            openButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            openButton.widthAnchor.constraint(equalToConstant: 34),
+            openButton.heightAnchor.constraint(equalToConstant: 28)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var config = ConfigStore.shared.load()
+    private var config = ConfigStore.shared.loadCached()
     private var settingsWindow: SettingsWindowController?
     private var refreshTimer: Timer?
+    private var refreshInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "LLM"
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        updateStatusIcon()
         rebuildMenu()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refresh()
+        refreshAllAsync()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+            self?.refreshAllAsync()
         }
     }
 
     private func rebuildMenu() {
         let menu = NSMenu()
-
-        let title = NSMenuItem(title: "Connected LLM Accounts", action: nil, keyEquivalent: "")
-        title.isEnabled = false
-        menu.addItem(title)
+        menu.autoenablesItems = false
 
         if config.profiles.isEmpty {
-            let empty = NSMenuItem(title: "No connected Claude/Codex accounts inferred", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude and Codex accounts..." : "No Claude/Codex accounts found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
             for profile in config.profiles {
-                let item = NSMenuItem(title: accountSummary(for: profile), action: nil, keyEquivalent: "")
-                item.isEnabled = false
+                let item = NSMenuItem()
+                item.view = ProfileMenuItemView(profile: profile, target: self, action: #selector(openProfileButton(_:)), isRefreshing: refreshInFlight)
                 menu.addItem(item)
             }
         }
 
         menu.addItem(NSMenuItem.separator())
 
-        for profile in config.profiles {
-            let item = NSMenuItem(title: "Open \(profile.label)", action: #selector(openProfile(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = profile.id
-            menu.addItem(item)
-        }
-
-        menu.addItem(NSMenuItem.separator())
         let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
+        settings.isEnabled = true
         menu.addItem(settings)
 
-        let refresh = NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r")
+        let refresh = NSMenuItem(title: refreshInFlight ? "Refreshing..." : "Refresh", action: #selector(refresh), keyEquivalent: "r")
         refresh.target = self
+        refresh.isEnabled = !refreshInFlight
         menu.addItem(refresh)
 
         menu.addItem(NSMenuItem.separator())
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
+        quit.isEnabled = true
         menu.addItem(quit)
 
         statusItem.menu = menu
     }
 
-    private func accountSummary(for profile: LaunchProfile) -> String {
-        var base: String
-        if let email = profile.accountEmail, let name = profile.accountName {
-            base = "\(profile.provider.rawValue): \(name) <\(email)>"
-        } else if let email = profile.accountEmail {
-            base = "\(profile.provider.rawValue): \(email)"
-        } else if let name = profile.accountName {
-            base = "\(profile.provider.rawValue): \(name)"
-        } else if profile.isPendingLogin == true {
-            return "\(profile.provider.rawValue): waiting for login"
-        } else {
-            base = "\(profile.provider.rawValue): signed-in account"
-        }
-
-        var details: [String] = []
-        if let plan = profile.accountPlan {
-            details.append(plan)
-        }
-        return details.isEmpty ? base : "\(base) - \(details.joined(separator: " - "))"
+    private func updateStatusIcon() {
+        guard let button = statusItem?.button else { return }
+        button.title = ""
+        button.imagePosition = .imageOnly
+        button.image = MenuBarIcon.make(
+            usagePercent: ProfileFormatting.bestUsagePercent(in: config.profiles),
+            isRefreshing: refreshInFlight)
+        button.toolTip = "LLM Usage Bar"
     }
 
-    @objc private func openProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              let profile = config.profiles.first(where: { $0.id == id }) else {
-            return
-        }
+    @objc private func openProfileButton(_ sender: NSButton) {
+        statusItem.menu?.cancelTracking()
+        guard let id = sender.identifier?.rawValue else { return }
+        openProfile(id: id)
+    }
+
+    private func openProfile(id: String) {
+        guard let profile = config.profiles.first(where: { $0.id == id }) else { return }
         do {
             try Launcher.launch(profile)
-            rebuildMenu()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                self?.refreshAllAsync()
+            }
         } catch {
             showError("Could not launch \(profile.label): \(error.localizedDescription)")
         }
@@ -1133,18 +2312,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showSettings() {
         settingsWindow = SettingsWindowController(config: config) { [weak self] newConfig in
-            self?.config = newConfig
+            guard let self else { return }
+            self.config = newConfig
             ConfigStore.shared.save(newConfig)
-            self?.rebuildMenu()
+            self.updateStatusIcon()
+            self.rebuildMenu()
+            self.refreshAllAsync()
         }
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func refresh() {
-        config = ConfigStore.shared.load()
-        settingsWindow?.refreshFromDiskPreservingSelection()
+        refreshAllAsync()
+    }
+
+    private func refreshAllAsync() {
+        guard !refreshInFlight else { return }
+        refreshInFlight = true
+        updateStatusIcon()
         rebuildMenu()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let loaded = ConfigStore.shared.load()
+            let refreshed = UsageRefresher.refresh(loaded)
+            ConfigStore.shared.save(refreshed)
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.config = refreshed
+                self.refreshInFlight = false
+                self.settingsWindow?.refreshFromDiskPreservingSelection()
+                self.updateStatusIcon()
+                self.rebuildMenu()
+            }
+        }
     }
 
     @objc private func quit() {
@@ -1165,6 +2367,18 @@ if CommandLine.arguments.contains("--dump-inferred-json") {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     if let data = try? encoder.encode(config), let text = String(data: data, encoding: .utf8) {
+        print(text)
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--dump-usage-json") {
+    let inferred = ConfigStore.shared.load()
+    let refreshed = UsageRefresher.refresh(inferred)
+    ConfigStore.shared.save(refreshed)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(refreshed), let text = String(data: data, encoding: .utf8) {
         print(text)
     }
     exit(0)

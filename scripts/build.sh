@@ -17,6 +17,7 @@ swiftc \
   -module-cache-path "$CACHE" \
   -framework AppKit \
   -framework Foundation \
+  -framework Security \
   "$ROOT/src/main.swift" \
   -o "$MACOS/LLMUsageBar"
 
