@@ -1,20 +1,38 @@
 # LLMCodeBar
 
-Menu bar app to watch your Claude and Codex usage, run several accounts of the same provider, and auto start your 5 hour session.
+> Your Claude and Codex limits in the menu bar. Built for running several accounts of the same provider, and auto starting your 5 hour session.
 
-![LLMCodeBar menu with two accounts](assets/screenshot.png)
+![LLMCodeBar menu with two Claude accounts and a Codex one](assets/screenshot.png)
 
-## What it does
+## Why this one
 
-- Shows the 5 hour session and weekly usage for each account, right in the menu bar.
-- Handles multiple accounts, including several of the same provider, each in its own isolated login.
-- Click an account in the dropdown to launch Claude or Codex signed into that account.
-- Auto starts the 5 hour session (Claude and Codex): when an account is idle it sends a tiny message on the cheapest model to start the clock, so your window runs on a schedule. Toggle it per account.
-- Per account: a Session (5h) bar, a Weekly bar, the reset times, and a 7 day trend line that goes green to red as you near the limit.
-- Pick which account's % shows in the menu bar.
+Plenty of menu bar apps show your Claude or Codex usage. This one is built for two things they don't do.
+
+**Run multiple accounts of the same provider.** Personal Claude and work Claude, right next to each other. Two Codex logins. As many as you want, each in its own isolated window so they never clash. Click an account in the dropdown to open Claude or Codex already signed into it.
+
+**Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude and Codex, per account.
+
+## Everything else
+
+- Session (5h) and Weekly bars for every account, with reset times.
+- A 7 day trend line per limit that goes green to red as you get close.
+- Pick one account's 5h % to show in the menu bar.
 - Refresh from every 30 seconds to every 30 minutes.
 - Launch at login.
-- Add accounts from Settings, it opens a login window and picks them up automatically.
+
+## Install
+
+Download **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
+
+It's unsigned (no paid Apple Developer ID), so macOS blocks the first launch. Right click the app and pick Open, or run:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"
+```
+
+macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude and/or Codex desktop apps installed and signed in.
+
+## Settings
 
 ![LLMCodeBar settings](assets/settings.png)
 
@@ -24,25 +42,11 @@ Local and read only, on your own accounts. Nothing leaves your machine except th
 
 - Reads your signed in Claude and Codex profiles in `~/Library/Application Support` for the account and plan.
 - Claude: your session cookies plus the claude.ai usage endpoint. Codex: the Codex CLI token in `auth.json` plus the ChatGPT usage endpoint.
-- Saves a small config file and a 7 day usage history for the sparklines.
+- Saves a small config and a 7 day usage history for the sparklines.
+
+When Claude isn't running, it decrypts Claude's cookie key and macOS asks for your password once. Click **Always Allow** and it caches the key so it stops asking, or turn off **Auto approve cookie access** in Settings to keep it away from the keychain entirely.
 
 These are the apps' internal endpoints, not official ones, so they can break if the providers change them.
-
-## Keychain prompt
-
-When Claude isn't running, the app unlocks Claude's cookie key and macOS asks for your password. Click **Always Allow** once and it caches the key, so it stops asking. Or uncheck **Auto approve cookie access** in Settings and it only reads usage while Claude is open.
-
-## Install
-
-Get **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
-
-It's unsigned, so the first launch macOS blocks it. Right click the app and pick Open, or run:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"
-```
-
-macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude and/or Codex desktop apps installed and signed in.
 
 ## Build
 

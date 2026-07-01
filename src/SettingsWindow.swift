@@ -16,6 +16,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let startSessionNow = NSButton(title: "Start 5h session now", target: nil, action: nil)
     private let refreshIntervalPopup = NSPopUpButton()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let accountTitle = NSTextField(labelWithString: "")
+    private let accountSubtitle = NSTextField(labelWithString: "")
+    private let advancedToggle = NSButton()
+    private let advancedStack = NSStackView()
 
     private let refreshOptions: [(title: String, seconds: Int)] = [
         ("30 sec", 30), ("1 min", 60), ("2 min", 120), ("5 min", 300), ("10 min", 600), ("15 min", 900), ("30 min", 1800),
@@ -25,7 +29,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.config = config
         self.onSave = onSave
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 432),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -124,10 +128,37 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.orientation = .vertical
         form.spacing = 10
 
-        addRow(to: form, label: "Label", control: labelField)
-        addRow(to: form, label: "Provider", control: providerPopup)
-        addRow(to: form, label: "App path", control: appPathField)
-        addRow(to: form, label: "Profile data folder", control: dataDirField)
+        // Account header.
+        accountTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        accountSubtitle.font = .systemFont(ofSize: 12)
+        accountSubtitle.textColor = .secondaryLabelColor
+        let header = NSStackView(views: [accountTitle, accountSubtitle])
+        header.orientation = .vertical
+        header.alignment = .leading
+        header.spacing = 1
+
+        // Advanced path/label fields, collapsed by default so the pane stays clean.
+        advancedStack.orientation = .vertical
+        advancedStack.spacing = 10
+        addRow(to: advancedStack, label: "Label", control: labelField)
+        addRow(to: advancedStack, label: "Provider", control: providerPopup)
+        addRow(to: advancedStack, label: "App path", control: appPathField)
+        addRow(to: advancedStack, label: "Profile data folder", control: dataDirField)
+        advancedStack.isHidden = true
+
+        advancedToggle.bezelStyle = .disclosure
+        advancedToggle.setButtonType(.pushOnPushOff)
+        advancedToggle.title = ""
+        advancedToggle.target = self
+        advancedToggle.action = #selector(toggleAdvanced)
+        let advancedLabel = NSTextField(labelWithString: "Advanced")
+        advancedLabel.textColor = .secondaryLabelColor
+        let advancedHeader = NSStackView(views: [advancedToggle, advancedLabel])
+        advancedHeader.orientation = .horizontal
+        advancedHeader.spacing = 4
+
+        form.addArrangedSubview(header)
+        form.setCustomSpacing(14, after: header)
         addRow(to: form, label: "Refresh every", control: refreshIntervalPopup)
         form.addArrangedSubview(launchAtLogin)
         form.addArrangedSubview(menuBarAccount)
@@ -145,6 +176,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(autoStartRow)
         form.addArrangedSubview(autoStartHelp)
         form.setCustomSpacing(2, after: autoStartRow)
+
+        form.addArrangedSubview(advancedHeader)
+        form.addArrangedSubview(advancedStack)
+        form.setCustomSpacing(14, after: advancedStack)
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byWordWrapping
@@ -226,7 +261,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         startSessionNow.toolTip = sessionActive
             ? "The 5-hour session is already running - there's nothing to start."
             : "Send a tiny “hi” now to start the 5-hour window."
-        statusLabel.stringValue = statusText(for: profile)
+
+        if profile.isPendingLogin == true {
+            accountTitle.stringValue = "Connect \(profile.provider.rawValue)"
+            accountSubtitle.stringValue = "Sign in when the window opens"
+        } else {
+            accountTitle.stringValue = profile.accountEmail ?? profile.accountName ?? "\(profile.provider.rawValue) account"
+            accountSubtitle.stringValue = [profile.provider.rawValue, profile.usage?.accountPlan ?? profile.accountPlan]
+                .compactMap { $0 }.joined(separator: "  ·  ")
+        }
+        statusLabel.stringValue = ""
+    }
+
+    @objc private func toggleAdvanced() {
+        let show = advancedToggle.state == .on
+        advancedStack.isHidden = !show
+        guard let window = window else { return }
+        let delta: CGFloat = 152
+        var frame = window.frame
+        frame.size.height += show ? delta : -delta
+        frame.origin.y -= show ? delta : -delta // keep the top edge fixed
+        window.setFrame(frame, display: true, animate: true)
     }
 
     private func writeSelection() {
