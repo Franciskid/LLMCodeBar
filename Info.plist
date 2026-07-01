@@ -3,15 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>LLM Usage Bar</string>
+	<string>LLMCodeBar</string>
 	<key>CFBundleExecutable</key>
-	<string>LLMUsageBar</string>
+	<string>LLMCodeBar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>fr.fraserv.llmusagebar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>LLM Usage Bar</string>
+	<string>LLMCodeBar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
