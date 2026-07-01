@@ -53,12 +53,12 @@ enum ElectronCookieReader {
             if !cookies.isEmpty {
                 return joined(cookies)
             }
-            // Cached key no longer decrypts (rotated) — drop it and fall through.
+            // Cached key no longer decrypts (rotated) - drop it and fall through.
             SafeStorageKeyCache.invalidate(for: service)
         }
 
         // 2. Fall back to the app's real Safe Storage key (may prompt once). Stop at
-        //    the first match — probing every service would prompt for each browser.
+        //    the first match - probing every service would prompt for each browser.
         for service in keychainServices {
             guard let key = keychainPassword(service: service) else { continue }
             let cookies = parse(with: key)

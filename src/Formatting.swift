@@ -67,7 +67,7 @@ enum ProfileFormatting {
     }
 
     static func resetText(for window: UsageWindow) -> String {
-        guard let resetsAt = window.resetsAt else { return "—" }
+        guard let resetsAt = window.resetsAt else { return "-" }
         // A weekly window resets days from now, so a bare "20:00" is meaningless.
         // Show the weekday whenever the reset isn't today.
         if Calendar.current.isDate(resetsAt, inSameDayAs: Date()) {

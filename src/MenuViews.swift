@@ -141,7 +141,7 @@ final class StatusDotView: NSView {
     }
 }
 
-/// Maps a used-percent (0–100) onto a smooth green → yellow → red gradient.
+/// Maps a used-percent (0-100) onto a smooth green → yellow → red gradient.
 enum UsageGradient {
     static func color(for percent: Double) -> NSColor {
         let t = max(0, min(1, percent / 100))

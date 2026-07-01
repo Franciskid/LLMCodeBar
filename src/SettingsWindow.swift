@@ -96,7 +96,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         providerPopup.addItems(withTitles: Provider.allCases.map(\.rawValue))
         launchAtLogin.state = config.launchAtLogin ? .on : .off
         autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off
-        autoApproveCookies.toolTip = "Reads the encrypted cookie store to fetch live usage. macOS asks to approve keychain access once — click \"Always Allow\". Uncheck to never prompt; usage then updates only while Claude/Codex is open."
+        autoApproveCookies.toolTip = "Reads the encrypted cookie store to fetch live usage. macOS asks to approve keychain access once - click \"Always Allow\". Uncheck to never prompt; usage then updates only while Claude/Codex is open."
 
         let cookiesHelp = NSTextField(wrappingLabelWithString: "Approve keychain access once (\"Always Allow\") instead of every launch. Uncheck to never prompt.")
         cookiesHelp.font = .systemFont(ofSize: 10.5)
@@ -112,7 +112,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         showSparklines.state = config.showsSparklines ? .on : .off
 
         autoStartSession.toolTip = "When the 5h window is idle or has reset, the app sends one tiny \"hi\" on the cheapest model to start the 5-hour window. For Claude it uses a throwaway chat that's deleted afterwards. Only fires when the session isn't already running. Codex support is experimental."
-        let autoStartHelp = NSTextField(wrappingLabelWithString: "Starts the 5h window when it's idle/reset by sending a tiny \"hi\" on the cheapest model. Only acts when the session isn't already running — use \"Start 5h session now\" to test it immediately. Codex is experimental.")
+        let autoStartHelp = NSTextField(wrappingLabelWithString: "Starts the 5h window when it's idle/reset by sending a tiny \"hi\" on the cheapest model. Only acts when the session isn't already running - use \"Start 5h session now\" to test it immediately. Codex is experimental.")
         autoStartHelp.font = .systemFont(ofSize: 10.5)
         autoStartHelp.textColor = .tertiaryLabelColor
         autoStartHelp.maximumNumberOfLines = 2
@@ -224,7 +224,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let sessionActive = profile.usage != nil && !SessionKickstarter.isSessionIdle(profile)
         startSessionNow.isEnabled = signedIn && !sessionActive
         startSessionNow.toolTip = sessionActive
-            ? "The 5-hour session is already running — there's nothing to start."
+            ? "The 5-hour session is already running - there's nothing to start."
             : "Send a tiny “hi” now to start the 5-hour window."
         statusLabel.stringValue = statusText(for: profile)
     }
@@ -356,7 +356,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             config.refreshIntervalSeconds = refreshOptions[index].seconds
         }
         onSave(config)
-        // Reload the list but keep the account the user was editing selected —
+        // Reload the list but keep the account the user was editing selected -
         // reloadData clears the selection, which otherwise snaps back to row 0.
         table.reloadData()
         restoreSelection(id: selectedID, provider: nil)

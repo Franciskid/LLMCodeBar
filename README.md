@@ -1,79 +1,58 @@
 # LLMCodeBar
 
-Menu bar app to keep an eye on your Claude and Codex usage.
+Menu bar app to watch your Claude and Codex usage, run several accounts of the same provider, and auto start your 5 hour session.
 
-The main reason it exists: it handles multiple accounts of the same provider (like two Claude accounts), and it can automatically start your 5 hour session for you. Most usage bar apps don't do either.
-
-![LLMCodeBar dropdown showing two accounts](assets/screenshot.png)
+![LLMCodeBar menu with two accounts](assets/screenshot.png)
 
 ## What it does
 
-- Shows your Claude and Codex usage in the menu bar: the 5 hour session limit and the weekly one.
-- Handles as many accounts as you want, including several from the same provider. Each one opens in its own isolated window so they don't clash.
-- Can auto start the 5 hour session. The window only starts counting once you send a message, so if an account is sitting idle the app sends a tiny message on the cheapest model to start the clock. Works for Claude and Codex, you turn it on per account.
-- Click the icon for a dropdown: each account with a Session (5h) bar, a Weekly bar, the reset times, and a 7 day trend line that goes green to red as you get close to the limit.
-- Refreshes anywhere from every 30 seconds to every 30 minutes, your call.
-- Can launch at login.
+- Shows the 5 hour session and weekly usage for each account, right in the menu bar.
+- Handles multiple accounts, including several of the same provider, each in its own isolated login.
+- Click an account in the dropdown to launch Claude or Codex signed into that account.
+- Auto starts the 5 hour session (Claude and Codex): when an account is idle it sends a tiny message on the cheapest model to start the clock, so your window runs on a schedule. Toggle it per account.
+- Per account: a Session (5h) bar, a Weekly bar, the reset times, and a 7 day trend line that goes green to red as you near the limit.
+- Pick which account's % shows in the menu bar.
+- Refresh from every 30 seconds to every 30 minutes.
+- Launch at login.
+- Add accounts from Settings, it opens a login window and picks them up automatically.
+
+![LLMCodeBar settings](assets/settings.png)
 
 ## How it gets the data
 
-It's all local and read only, on your own accounts. Nothing leaves your machine except the requests to Anthropic and OpenAI you'd be making anyway.
+Local and read only, on your own accounts. Nothing leaves your machine except the usual requests to Anthropic and OpenAI.
 
-- It reads your signed in Claude and Codex profiles from `~/Library/Application Support` to get the account email and plan.
-- For the live usage it uses the session you already have:
-  - Claude: reads your session cookies (from the running Claude window or the encrypted cookie store) and hits the same claude.ai usage endpoint the web app uses.
-  - Codex: uses the OAuth token the Codex CLI saved in `auth.json` and hits the ChatGPT backend usage endpoint.
-- It saves a small config file and a 7 day history of usage numbers for the sparklines. That's it.
+- Reads your signed in Claude and Codex profiles in `~/Library/Application Support` for the account and plan.
+- Claude: your session cookies plus the claude.ai usage endpoint. Codex: the Codex CLI token in `auth.json` plus the ChatGPT usage endpoint.
+- Saves a small config file and a 7 day usage history for the sparklines.
 
 These are the apps' internal endpoints, not official ones, so they can break if the providers change them.
 
-## The keychain password prompt
+## Keychain prompt
 
-When the Claude app isn't running, LLMCodeBar decrypts Claude's cookie store to read usage, and macOS asks for your password to unlock the key. To stop it asking every time:
-
-- Click **Always Allow** when the prompt shows up (not just Allow). The app caches the key after that so it won't ask again.
-- Or open Settings and uncheck **Auto approve cookie access**. Then it never touches the keychain, and usage only updates while the Claude app is open.
-
-Rebuilding from source changes the app signature, so macOS might ask once more after that.
+When Claude isn't running, the app unlocks Claude's cookie key and macOS asks for your password. Click **Always Allow** once and it caches the key, so it stops asking. Or uncheck **Auto approve cookie access** in Settings and it only reads usage while Claude is open.
 
 ## Install
 
-Download **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
+Get **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
 
-It's not signed with an Apple Developer ID, so the first time macOS will say it can't check it. Either right click the app and pick Open, or run:
+It's unsigned, so the first launch macOS blocks it. Right click the app and pick Open, or run:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"
 ```
 
-Needs macOS 13 or newer. Universal build, runs on Apple Silicon and Intel. You also need the Claude and/or Codex desktop apps installed and signed in.
+macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude and/or Codex desktop apps installed and signed in.
 
-## Build it yourself
-
-Plain Swift and AppKit, no Xcode project, no dependencies.
+## Build
 
 ```sh
 git clone https://github.com/Franciskid/LLMCodeBar.git
 cd LLMCodeBar
-./scripts/install.sh   # build, put it in /Applications, launch
-# ./scripts/build.sh   # just build to dist/
-# ./scripts/dmg.sh     # build the dmg
+./scripts/install.sh   # build, install, launch
 ```
 
-## Settings
-
-- Refresh interval, 30s to 30min.
-- Which account's 5h % shows in the menu bar.
-- Show the sparklines or not.
-- Auto approve cookie access (the keychain thing above).
-- Auto start 5h session, per account.
-
-## Caveats
-
-- Unofficial endpoints, might break when the providers change things.
-- Unsigned, so you deal with the Gatekeeper warning once.
-- The plan (Pro and so on) is a guess from local data.
-- Auto start sends a real message to your account. A small one, but it uses a bit of quota.
+Plain Swift and AppKit, no Xcode project, no deps.
 
 ## License
 

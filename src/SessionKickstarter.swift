@@ -8,7 +8,7 @@ import Foundation
 /// - Claude uses its private web endpoints (the same ones the desktop app uses);
 ///   Codex uses the token-based backend the Codex CLI uses. Both are unofficial and
 ///   may change; failures are surfaced as text and never crash anything.
-/// - It consumes a negligible amount of quota by design — that's what starts the window.
+/// - It consumes a negligible amount of quota by design - that's what starts the window.
 enum SessionKickstarter {
     private static let queue = DispatchQueue(label: "fr.fraserv.llmusagebar.session-kick")
     private static var lastKick: [String: Date] = [:]
@@ -42,7 +42,7 @@ enum SessionKickstarter {
         }
     }
 
-    /// Whether the 5-hour clock is currently *not* running — i.e. the session is
+    /// Whether the 5-hour clock is currently *not* running - i.e. the session is
     /// idle/reset/never-started, so there's something to start. Never acts on missing
     /// or stale data. Note this keys off whether the clock has started, not raw usage:
     /// a session that just started sits at ~0% but is running.
@@ -100,10 +100,10 @@ enum SessionKickstarter {
                 jsonBody: ["uuid": conversationUUID, "name": ""],
                 headers: headers)
             guard (200...299).contains(createResponse.statusCode) else {
-                return "Couldn't start session — creating the chat failed (HTTP \(createResponse.statusCode))."
+                return "Couldn't start session - creating the chat failed (HTTP \(createResponse.statusCode))."
             }
 
-            // 2. Send one minimal message — this is what starts the 5-hour window. A
+            // 2. Send one minimal message - this is what starts the 5-hour window. A
             //    rejected model returns 403 before generating (nothing is sent), so we
             //    can safely try candidates until one is accepted.
             let completionURL = URL(string: "https://claude.ai/api/organizations/\(orgID)/chat_conversations/\(conversationUUID)/completion")!
@@ -126,7 +126,7 @@ enum SessionKickstarter {
                 let response = try SimpleHTTP.send(completionURL, method: "POST", jsonBody: body, headers: completionHeaders, timeout: 25)
                 if (200...299).contains(response.statusCode) {
                     deleteClaudeConversation(orgID: orgID, uuid: conversationUUID, headers: headers)
-                    return "Started a 5h session — sent “hi” on \(model ?? "the default model")."
+                    return "Started a 5h session - sent “hi” on \(model ?? "the default model")."
                 }
                 lastStatus = response.statusCode
                 lastError = conciseError(response.data)
@@ -162,7 +162,7 @@ enum SessionKickstarter {
                     response = try sendCodexMessage(model: model, credentials: credentials)
                 }
                 if (200...299).contains(response.statusCode) {
-                    return "Started a Codex 5h session — sent “hi” on \(model)."
+                    return "Started a Codex 5h session - sent “hi” on \(model)."
                 }
                 lastStatus = response.statusCode
                 lastError = conciseError(response.data)
