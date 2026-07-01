@@ -2358,18 +2358,8 @@ enum ProfileFormatting {
     }
 
     static func resetText(for window: UsageWindow) -> String {
-        guard let resetsAt = window.resetsAt else { return "Reset unavailable" }
-        let seconds = max(0, Int(resetsAt.timeIntervalSince(Date())))
-        let days = seconds / 86400
-        let hours = (seconds % 86400) / 3600
-        let minutes = (seconds % 3600) / 60
-        if days > 0 {
-            return "Resets in \(days)d \(hours)h"
-        }
-        if hours > 0 {
-            return "Resets in \(hours)h \(minutes)m"
-        }
-        return "Resets in \(max(1, minutes))m"
+        guard let resetsAt = window.resetsAt else { return "--:--" }
+        return resetClockFormatter.string(from: resetsAt)
     }
 
     static func primaryUsagePercent(for profile: LaunchProfile) -> Double? {
@@ -2377,7 +2367,14 @@ enum ProfileFormatting {
     }
 
     static func bestUsagePercent(in profiles: [LaunchProfile]) -> Double? {
-        profiles.compactMap(primaryUsagePercent(for:)).max()
+        profiles
+            .filter { !isFreePlan($0.usage?.accountPlan ?? $0.accountPlan) }
+            .compactMap(primaryUsagePercent(for:))
+            .max()
+    }
+
+    static func isFreePlan(_ plan: String?) -> Bool {
+        plan?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "free"
     }
 
     static func providerSymbol(for provider: Provider) -> String {
@@ -2392,6 +2389,13 @@ enum ProfileFormatting {
         formatter.unitsStyle = .abbreviated
         return formatter
     }()
+
+    private static let resetClockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.timeZone = .current
+        return formatter
+    }()
 }
 
 enum MenuBarIcon {
@@ -2402,45 +2406,62 @@ enum MenuBarIcon {
         defer { image.unlockFocus() }
 
         let accent = isRefreshing ? NSColor.systemBlue : color(for: usagePercent)
-        let stroke = NSColor.labelColor.withAlphaComponent(0.92)
-        let lineWidth: CGFloat = 1.6
+        let stroke = NSColor.labelColor.withAlphaComponent(0.72)
+        let softAccent = accent.withAlphaComponent(0.22)
+        let center = NSPoint(x: 12, y: 9)
         let nodes = [
-            NSPoint(x: 5, y: 9),
-            NSPoint(x: 11, y: 14),
-            NSPoint(x: 18, y: 11),
-            NSPoint(x: 14, y: 4),
-            NSPoint(x: 7, y: 3)
+            NSPoint(x: 5, y: 5),
+            NSPoint(x: 5, y: 13),
+            NSPoint(x: 12, y: 15),
+            NSPoint(x: 19, y: 12),
+            NSPoint(x: 18, y: 5),
+            center
         ]
 
-        stroke.setStroke()
-        let path = NSBezierPath()
-        path.lineWidth = lineWidth
-        path.move(to: nodes[0])
-        path.line(to: nodes[1])
-        path.line(to: nodes[2])
-        path.line(to: nodes[3])
-        path.line(to: nodes[4])
-        path.line(to: nodes[0])
-        path.move(to: nodes[1])
-        path.line(to: nodes[3])
-        path.stroke()
+        let glow = NSBezierPath(ovalIn: NSRect(x: 6, y: 3, width: 12, height: 12))
+        softAccent.setFill()
+        glow.fill()
 
-        for (index, node) in nodes.enumerated() {
-            let radius: CGFloat = index == 1 ? 2.4 : 2.0
-            let rect = NSRect(x: node.x - radius, y: node.y - radius, width: radius * 2, height: radius * 2)
-            (index == 1 ? accent : stroke).setFill()
-            NSBezierPath(ovalIn: rect).fill()
-        }
+        stroke.setStroke()
+        let links = NSBezierPath()
+        links.lineWidth = 1.25
+        links.move(to: nodes[0])
+        links.line(to: center)
+        links.line(to: nodes[2])
+        links.move(to: nodes[1])
+        links.line(to: center)
+        links.line(to: nodes[3])
+        links.move(to: nodes[4])
+        links.line(to: center)
+        links.stroke()
+
+        NSColor.labelColor.withAlphaComponent(0.20).setStroke()
+        let ringRect = NSRect(x: center.x - 5.2, y: center.y - 5.2, width: 10.4, height: 10.4)
+        let ring = NSBezierPath(ovalIn: ringRect)
+        ring.lineWidth = 1.3
+        ring.stroke()
 
         if let usagePercent {
             let remaining = max(0, min(1, (100 - usagePercent) / 100))
-            let barRect = NSRect(x: 21, y: 3, width: 2, height: 12)
-            NSColor.labelColor.withAlphaComponent(0.18).setFill()
-            NSBezierPath(roundedRect: barRect, xRadius: 1, yRadius: 1).fill()
-            accent.setFill()
-            let fillHeight = barRect.height * CGFloat(remaining)
-            NSBezierPath(roundedRect: NSRect(x: barRect.minX, y: barRect.minY, width: barRect.width, height: fillHeight), xRadius: 1, yRadius: 1).fill()
+            accent.setStroke()
+            let arc = NSBezierPath()
+            arc.lineWidth = 1.8
+            arc.appendArc(
+                withCenter: center,
+                radius: 5.2,
+                startAngle: 90,
+                endAngle: 90 - CGFloat(360 * remaining),
+                clockwise: true)
+            arc.stroke()
         }
+
+        for node in nodes.dropLast() {
+            NSColor.labelColor.withAlphaComponent(0.82).setFill()
+            NSBezierPath(ovalIn: NSRect(x: node.x - 1.35, y: node.y - 1.35, width: 2.7, height: 2.7)).fill()
+        }
+
+        accent.setFill()
+        NSBezierPath(ovalIn: NSRect(x: center.x - 2.35, y: center.y - 2.35, width: 4.7, height: 4.7)).fill()
 
         image.isTemplate = false
         return image
@@ -2498,7 +2519,7 @@ final class StatusDotView: NSView {
 
 final class QuotaWindowView: NSView {
     init(window: UsageWindow) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 310, height: 38))
+        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 30))
         translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: ProfileFormatting.windowTitle(window.title))
@@ -2513,8 +2534,9 @@ final class QuotaWindowView: NSView {
 
         let reset = NSTextField(labelWithString: ProfileFormatting.resetText(for: window))
         reset.translatesAutoresizingMaskIntoConstraints = false
-        reset.font = .systemFont(ofSize: 10.5, weight: .regular)
-        reset.textColor = .tertiaryLabelColor
+        reset.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
+        reset.textColor = .secondaryLabelColor
+        reset.alignment = .right
 
         let bar = UsageBarView()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -2535,13 +2557,14 @@ final class QuotaWindowView: NSView {
             used.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
 
             bar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.trailingAnchor.constraint(equalTo: reset.leadingAnchor, constant: -10),
             bar.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
             bar.heightAnchor.constraint(equalToConstant: 6),
 
             reset.trailingAnchor.constraint(equalTo: trailingAnchor),
-            reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 3),
-            reset.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor)
+            reset.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            reset.widthAnchor.constraint(equalToConstant: 42),
+            bar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor)
         ])
     }
 
@@ -2560,14 +2583,19 @@ final class ProfileMenuItemView: NSView {
     private let profileID: String
     private weak var actionTarget: AnyObject?
     private let action: Selector
+    private var trackingArea: NSTrackingArea?
+    private var isHovering = false {
+        didSet { needsDisplay = true }
+    }
 
     init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool) {
         self.profileID = profile.id
         self.actionTarget = target
         self.action = action
         let windowCount = max(1, min(2, profile.usage?.windows.count ?? 0))
-        super.init(frame: NSRect(x: 0, y: 0, width: 420, height: CGFloat(62 + windowCount * 42)))
+        super.init(frame: NSRect(x: 0, y: 0, width: 408, height: CGFloat(58 + windowCount * 35)))
         identifier = NSUserInterfaceItemIdentifier(profileID)
+        wantsLayer = true
 
         let appIcon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
         appIcon.size = NSSize(width: 28, height: 28)
@@ -2615,7 +2643,7 @@ final class ProfileMenuItemView: NSView {
         let quotaStack = NSStackView(views: quotaViews)
         quotaStack.translatesAutoresizingMaskIntoConstraints = false
         quotaStack.orientation = .vertical
-        quotaStack.spacing = 7
+        quotaStack.spacing = 5
         quotaStack.alignment = .leading
 
         addSubview(icon)
@@ -2642,14 +2670,44 @@ final class ProfileMenuItemView: NSView {
             subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
             quotaStack.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            quotaStack.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 10),
-            quotaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            quotaStack.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 8),
+            quotaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             quotaStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10)
         ])
     }
 
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+    }
+
     override func mouseDown(with event: NSEvent) {
         performOpen(self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard isHovering else { return }
+        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+        let rect = bounds.insetBy(dx: 8, dy: 5)
+        NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
     }
 
     @objc private func performOpen(_ sender: Any?) {
