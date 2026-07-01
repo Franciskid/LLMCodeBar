@@ -6,18 +6,21 @@ Native macOS menu bar app for launching isolated Claude/Codex desktop profiles a
 
 - Menu bar dropdown with Claude and Codex profiles.
 - Settings window for adding/removing/editing profiles.
-- Profile inference from existing support folders such as:
+- Connected-account inference from existing support folders such as:
   - `~/Library/Application Support/Claude`
   - `~/Library/Application Support/Claude-*`
   - `~/Library/Application Support/Codex`
   - `~/Library/Application Support/com.openai.codex`
+- Real account labels are used when the local app profile exposes a name or email.
+- Profiles without connected-account evidence are ignored.
 - Isolated launches using the app executable plus `--user-data-dir=<profile folder>`.
-- Local 5-hour and 7-day usage estimates.
 - Autostart by writing a user LaunchAgent.
 
 ## Important quota note
 
-Claude and Codex subscription-window quotas are provider-side, dynamic, and not currently exposed through a stable public desktop API. This app's first version records local launch/session markers and displays those against configurable 5-hour and weekly budgets. The code keeps quota collection isolated so a later adapter can scrape a dashboard or call a private/official endpoint if one becomes available.
+Claude and Codex subscription-window quotas are provider-side, dynamic, and not currently exposed through a stable public desktop API. This app does not invent local quota percentages. It shows connected accounts and leaves quota as unavailable until a real provider adapter can scrape a dashboard or call a private/official endpoint.
+
+Codex may store the signed-in username hashed/encrypted in Chromium `Secure Preferences`. In that case the app can detect that a Codex account is signed in, but cannot always display the real email/name without a provider-side query.
 
 ## Build
 

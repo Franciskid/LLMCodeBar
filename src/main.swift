@@ -14,17 +14,34 @@ struct LaunchProfile: Codable, Identifiable {
     var dataDir: String
     var fiveHourBudget: Double
     var weeklyBudget: Double
+    var accountName: String?
+    var accountEmail: String?
+    var signedIn: Bool?
 
-    static func make(label: String, provider: Provider, appPath: String, dataDir: String) -> LaunchProfile {
-        LaunchProfile(
+    static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity) -> LaunchProfile {
+        let account = identity.displayName ?? identity.email ?? "Signed-in account"
+        return LaunchProfile(
             id: UUID().uuidString,
-            label: label,
+            label: "\(provider.rawValue) - \(account)",
             provider: provider,
             appPath: appPath,
             dataDir: dataDir,
             fiveHourBudget: 100,
-            weeklyBudget: 100
+            weeklyBudget: 100,
+            accountName: identity.displayName,
+            accountEmail: identity.email,
+            signedIn: identity.isSignedIn
         )
+    }
+}
+
+struct AccountIdentity {
+    var displayName: String?
+    var email: String?
+    var isSignedIn: Bool
+
+    var hasUsableLabel: Bool {
+        displayName != nil || email != nil || isSignedIn
     }
 }
 
@@ -77,11 +94,23 @@ final class ConfigStore {
     func load() -> AppConfig {
         Paths.shared.ensureSupportDirectory()
         guard let data = try? Data(contentsOf: Paths.shared.configURL),
-              let config = try? decoder.decode(AppConfig.self, from: data) else {
+              let existing = try? decoder.decode(AppConfig.self, from: data) else {
             let config = AppConfig(launchAtLogin: false, profiles: inferProfiles())
             save(config)
             return config
         }
+
+        var config = AppConfig(launchAtLogin: existing.launchAtLogin, profiles: inferProfiles())
+        let previousByPath = Dictionary(uniqueKeysWithValues: existing.profiles.map { ("\($0.provider.rawValue)|\($0.dataDir)", $0) })
+        for index in config.profiles.indices {
+            let key = "\(config.profiles[index].provider.rawValue)|\(config.profiles[index].dataDir)"
+            if let previous = previousByPath[key] {
+                config.profiles[index].id = previous.id
+                config.profiles[index].fiveHourBudget = previous.fiveHourBudget
+                config.profiles[index].weeklyBudget = previous.weeklyBudget
+            }
+        }
+        save(config)
         return config
     }
 
@@ -104,15 +133,17 @@ final class ConfigStore {
 
         if fm.fileExists(atPath: claudeApp) {
             let base = "\(support)/Claude"
-            if fm.fileExists(atPath: base) {
-                results.append(.make(label: "Claude - Current", provider: .claude, appPath: claudeApp, dataDir: base))
+            if let identity = AccountResolver.identity(in: base, provider: .claude) {
+                results.append(.make(provider: .claude, appPath: claudeApp, dataDir: base, identity: identity))
             }
             if let dirs = try? fm.contentsOfDirectory(atPath: support) {
                 for dir in dirs.sorted() where dir.hasPrefix("Claude-") {
                     let path = "\(support)/\(dir)"
                     var isDir: ObjCBool = false
-                    if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-                        results.append(.make(label: dir.replacingOccurrences(of: "-", with: " "), provider: .claude, appPath: claudeApp, dataDir: path))
+                    if fm.fileExists(atPath: path, isDirectory: &isDir),
+                       isDir.boolValue,
+                       let identity = AccountResolver.identity(in: path, provider: .claude) {
+                        results.append(.make(provider: .claude, appPath: claudeApp, dataDir: path, identity: identity))
                     }
                 }
             }
@@ -120,19 +151,14 @@ final class ConfigStore {
 
         if fm.fileExists(atPath: codexApp) {
             let candidates = [
-                ("Codex - Current", "\(support)/Codex"),
-                ("Codex - OpenAI", "\(support)/com.openai.codex")
+                "\(support)/Codex",
+                "\(support)/com.openai.codex"
             ]
-            for candidate in candidates where fm.fileExists(atPath: candidate.1) {
-                results.append(.make(label: candidate.0, provider: .codex, appPath: codexApp, dataDir: candidate.1))
+            for candidate in candidates where fm.fileExists(atPath: candidate) {
+                if let identity = AccountResolver.identity(in: candidate, provider: .codex) {
+                    results.append(.make(provider: .codex, appPath: codexApp, dataDir: candidate, identity: identity))
+                }
             }
-        }
-
-        if results.isEmpty {
-            results = [
-                .make(label: "Claude - Personal", provider: .claude, appPath: claudeApp, dataDir: "\(support)/Claude-Personal"),
-                .make(label: "Codex - Personal", provider: .codex, appPath: codexApp, dataDir: "\(support)/Codex-Personal")
-            ]
         }
 
         return deduplicate(results)
@@ -149,6 +175,217 @@ final class ConfigStore {
             }
         }
         return output
+    }
+}
+
+enum AccountResolver {
+    static func identity(in dataDir: String, provider: Provider) -> AccountIdentity? {
+        let root = URL(fileURLWithPath: Launcher.expanding(dataDir))
+        let files = relevantFiles(under: root)
+        var emails: [String] = []
+        var names: [String] = []
+        var signedIn = false
+
+        for file in files {
+            guard let text = readableText(from: file) else { continue }
+            emails.append(contentsOf: extractEmails(from: text))
+            names.append(contentsOf: extractNamedValues(from: text))
+            if text.contains("\"account_id\"") ||
+                text.contains("\"last_signed_in_username\"") ||
+                text.contains("sessionKey") ||
+                text.contains("lastSignedIn") {
+                signedIn = true
+            }
+        }
+
+        let email = preferredEmail(from: emails, provider: provider)
+        let name = preferredName(from: names, excluding: email, provider: provider)
+
+        if email != nil || name != nil {
+            return AccountIdentity(displayName: name, email: email, isSignedIn: true)
+        }
+
+        if provider == .codex && signedIn {
+            return AccountIdentity(displayName: nil, email: nil, isSignedIn: true)
+        }
+
+        return nil
+    }
+
+    private static func relevantFiles(under root: URL) -> [URL] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root.path) else { return [] }
+
+        var files: [URL] = []
+        let directNames = [
+            "Preferences",
+            "Secure Preferences",
+            "Local State",
+            "config.json",
+            "bridge-state.json",
+            "buddy-tokens.json"
+        ]
+
+        for name in directNames {
+            let file = root.appendingPathComponent(name)
+            if fm.fileExists(atPath: file.path) {
+                files.append(file)
+            }
+        }
+
+        let relativeDirs = [
+            "Local Storage/leveldb",
+            "Session Storage",
+            "Default",
+            "Default/Local Storage/leveldb",
+            "Default/Session Storage",
+            "Default/Partitions/codex-browser-app",
+            "Default/Partitions/codex-browser-app/Local Storage/leveldb",
+            "Default/Partitions/codex-browser-app/Session Storage"
+        ]
+
+        for relativeDir in relativeDirs {
+            let dir = root.appendingPathComponent(relativeDir)
+            guard let enumerator = fm.enumerator(
+                at: dir,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            for case let file as URL in enumerator {
+                guard isRelevantFile(file) else { continue }
+                files.append(file)
+            }
+        }
+
+        return Array(Set(files)).sorted { $0.path < $1.path }
+    }
+
+    private static func isRelevantFile(_ file: URL) -> Bool {
+        let name = file.lastPathComponent
+        let allowedNames = [
+            "Preferences",
+            "Secure Preferences",
+            "Local State",
+            "Account Web Data",
+            "Login Data For Account"
+        ]
+        if allowedNames.contains(name) { return true }
+        return name.hasSuffix(".ldb") || name.hasSuffix(".log")
+    }
+
+    private static func readableText(from file: URL) -> String? {
+        guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              (values.fileSize ?? 0) <= 8_000_000,
+              let data = try? Data(contentsOf: file) else {
+            return nil
+        }
+
+        if let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+
+        let bytes = data.map { byte -> UInt8 in
+            if byte == 9 || byte == 10 || byte == 13 || (byte >= 32 && byte <= 126) {
+                return byte
+            }
+            return 32
+        }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    private static func extractEmails(from text: String) -> [String] {
+        matches(
+            pattern: #"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#,
+            in: text,
+            options: [.caseInsensitive]
+        )
+        .map { $0.lowercased() }
+    }
+
+    private static func extractNamedValues(from text: String) -> [String] {
+        let patterns = [
+            #""(?:displayName|display_name|fullName|full_name|name|email|userEmail|user_email)"\s*:\s*"([^"]{3,120})""#,
+            #"(?:displayName|display_name|fullName|full_name|name|email|userEmail|user_email)\\?":\\?"([^"\\]{3,120})\\?""#
+        ]
+        return patterns.flatMap { pattern in
+            captureMatches(pattern: pattern, in: text)
+        }
+    }
+
+    private static func preferredEmail(from emails: [String], provider: Provider) -> String? {
+        let blockedDomains = [
+            "example.com",
+            "example.org",
+            "getsentry.com",
+            "openssl.org",
+            "sourceware.org"
+        ]
+        let filtered = emails.filter { email in
+            guard let domain = email.split(separator: "@").last else { return false }
+            if blockedDomains.contains(String(domain)) { return false }
+            if email.contains("opengraph-image") { return false }
+            return true
+        }
+
+        if provider == .claude {
+            return filtered.first
+        }
+        return filtered.first { email in
+            email.contains("openai") || email.contains("gmail") || email.contains("icloud") || email.contains("francois") || email.contains("francis")
+        } ?? filtered.first
+    }
+
+    private static func preferredName(from names: [String], excluding email: String?, provider: Provider) -> String? {
+        let blocked = Set([
+            "Claude",
+            "Codex",
+            "Votre Codex",
+            "Personne 1",
+            "Personne 1",
+            "Web Store",
+            "Chromium PDF Viewer"
+        ])
+
+        for rawName in names {
+            let name = rawName
+                .replacingOccurrences(of: #"\"#, with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty,
+                  !blocked.contains(name),
+                  name != email,
+                  !name.contains("@"),
+                  name.count >= 3,
+                  name.count <= 80 else {
+                continue
+            }
+            return name
+        }
+        return nil
+    }
+
+    private static func matches(pattern: String, in text: String, options: NSRegularExpression.Options = []) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { result in
+            guard let matchRange = Range(result.range, in: text) else { return nil }
+            return String(text[matchRange])
+        }
+    }
+
+    private static func captureMatches(pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { result in
+            guard result.numberOfRanges > 1,
+                  let matchRange = Range(result.range(at: 1), in: text) else {
+                return nil
+            }
+            return String(text[matchRange])
+        }
     }
 }
 
@@ -249,7 +486,6 @@ enum Launcher {
         process.arguments = ["--user-data-dir=\(dataDir)"]
         process.environment = ProcessInfo.processInfo.environment
         try process.run()
-        UsageStore.shared.add(profile: profile, units: 1, note: "Launched \(profile.label)")
     }
 
     static func expanding(_ path: String) -> String {
@@ -265,8 +501,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let appPathField = NSTextField()
     private let dataDirField = NSTextField()
     private let providerPopup = NSPopUpButton()
-    private let fiveHourField = NSTextField()
-    private let weeklyField = NSTextField()
     private let launchAtLogin = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
 
@@ -336,20 +570,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         addRow(to: form, label: "Provider", control: providerPopup)
         addRow(to: form, label: "App path", control: appPathField)
         addRow(to: form, label: "Profile data folder", control: dataDirField)
-        addRow(to: form, label: "5-hour budget units", control: fiveHourField)
-        addRow(to: form, label: "Weekly budget units", control: weeklyField)
         form.addArrangedSubview(launchAtLogin)
 
         statusLabel.textColor = .secondaryLabelColor
         form.addArrangedSubview(statusLabel)
 
-        let addButton = NSButton(title: "Add", target: self, action: #selector(addProfile))
         let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeProfile))
-        let inferButton = NSButton(title: "Infer Existing", target: self, action: #selector(inferExisting))
+        let inferButton = NSButton(title: "Infer Connected Accounts", target: self, action: #selector(inferExisting))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(save))
         saveButton.keyEquivalent = "\r"
 
-        let buttons = NSStackView(views: [addButton, removeButton, inferButton, saveButton])
+        let buttons = NSStackView(views: [removeButton, inferButton, saveButton])
         buttons.translatesAutoresizingMaskIntoConstraints = false
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -400,9 +631,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         providerPopup.selectItem(withTitle: profile.provider.rawValue)
         appPathField.stringValue = profile.appPath
         dataDirField.stringValue = profile.dataDir
-        fiveHourField.stringValue = String(format: "%.0f", profile.fiveHourBudget)
-        weeklyField.stringValue = String(format: "%.0f", profile.weeklyBudget)
-        statusLabel.stringValue = "Quota is a local estimate until a provider quota adapter is connected."
+        statusLabel.stringValue = profile.accountEmail ?? profile.accountName ?? "Signed-in account detected; exact account name is not exposed locally."
     }
 
     private func writeSelection() {
@@ -412,16 +641,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         config.profiles[row].provider = Provider(rawValue: providerPopup.titleOfSelectedItem ?? "Claude") ?? .claude
         config.profiles[row].appPath = appPathField.stringValue
         config.profiles[row].dataDir = dataDirField.stringValue
-        config.profiles[row].fiveHourBudget = max(1, Double(fiveHourField.stringValue) ?? 100)
-        config.profiles[row].weeklyBudget = max(1, Double(weeklyField.stringValue) ?? 100)
-    }
-
-    @objc private func addProfile() {
-        writeSelection()
-        let support = FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support"
-        config.profiles.append(.make(label: "Claude - New", provider: .claude, appPath: "/Applications/Claude.app", dataDir: "\(support)/Claude-New"))
-        table.reloadData()
-        table.selectRowIndexes(IndexSet(integer: config.profiles.count - 1), byExtendingSelection: false)
     }
 
     @objc private func removeProfile() {
@@ -437,16 +656,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func inferExisting() {
         writeSelection()
         let inferred = ConfigStore.shared.inferProfiles()
-        var existing = Set(config.profiles.map { "\($0.provider.rawValue)|\($0.dataDir)" })
-        for profile in inferred {
-            let key = "\(profile.provider.rawValue)|\(profile.dataDir)"
-            if !existing.contains(key) {
-                existing.insert(key)
-                config.profiles.append(profile)
-            }
-        }
+        config.profiles = inferred
         table.reloadData()
-        statusLabel.stringValue = "Inferred \(inferred.count) existing profile candidates."
+        if !config.profiles.isEmpty {
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+        statusLabel.stringValue = "Inferred \(inferred.count) connected account(s)."
     }
 
     @objc private func save() {
@@ -465,7 +680,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UsageStore.shared.prune()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "LLM"
         rebuildMenu()
@@ -477,18 +691,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        let title = NSMenuItem(title: "Subscription Windows", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: "Connected LLM Accounts", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
 
         if config.profiles.isEmpty {
-            let empty = NSMenuItem(title: "No profiles configured", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "No connected Claude/Codex accounts inferred", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
             for profile in config.profiles {
-                let summary = usageSummary(for: profile)
-                let item = NSMenuItem(title: "\(profile.label): \(summary)", action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: accountSummary(for: profile), action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             }
@@ -503,18 +716,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
 
-        if !config.profiles.isEmpty {
-            menu.addItem(NSMenuItem.separator())
-            for profile in config.profiles {
-                let item = NSMenuItem(title: "Mark +10% \(profile.label)", action: #selector(markUsage(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = profile.id
-                menu.addItem(item)
-            }
-        }
-
         menu.addItem(NSMenuItem.separator())
-        let note = NSMenuItem(title: "Usage shown is a local estimate", action: nil, keyEquivalent: "")
+        let note = NSMenuItem(title: "Subscription quota: unavailable until real provider adapter is connected", action: nil, keyEquivalent: "")
         note.isEnabled = false
         menu.addItem(note)
 
@@ -535,15 +738,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    private func usageSummary(for profile: LaunchProfile) -> String {
-        let five = UsageStore.shared.usage(profile: profile, interval: 60 * 60 * 5)
-        let week = UsageStore.shared.usage(profile: profile, interval: 60 * 60 * 24 * 7)
-        return "5h \(percent(five, profile.fiveHourBudget)) / week \(percent(week, profile.weeklyBudget))"
-    }
-
-    private func percent(_ used: Double, _ budget: Double) -> String {
-        let value = min(999, max(0, used / max(1, budget) * 100))
-        return String(format: "%.0f%%", value)
+    private func accountSummary(for profile: LaunchProfile) -> String {
+        if let email = profile.accountEmail, let name = profile.accountName {
+            return "\(profile.provider.rawValue): \(name) <\(email)>"
+        }
+        if let email = profile.accountEmail {
+            return "\(profile.provider.rawValue): \(email)"
+        }
+        if let name = profile.accountName {
+            return "\(profile.provider.rawValue): \(name)"
+        }
+        return "\(profile.provider.rawValue): signed-in account"
     }
 
     @objc private func openProfile(_ sender: NSMenuItem) {
@@ -557,15 +762,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             showError("Could not launch \(profile.label): \(error.localizedDescription)")
         }
-    }
-
-    @objc private func markUsage(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              let profile = config.profiles.first(where: { $0.id == id }) else {
-            return
-        }
-        UsageStore.shared.add(profile: profile, units: 10, note: "Manual usage marker")
-        rebuildMenu()
     }
 
     @objc private func showSettings() {
