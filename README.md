@@ -1,83 +1,89 @@
 # LLMCodeBar
 
-A tiny macOS menu bar app that shows how much of your **Claude** and **Codex** usage you've burned through — your 5‑hour session and weekly limits — without opening either app.
+A tiny macOS menu bar app for people juggling several Claude and Codex accounts, with one trick the other usage trackers don't have: it can automatically start your 5 hour session so the clock is always running.
 
-![LLMCodeBar dropdown showing Claude and Codex usage](assets/screenshot.png)
+![LLMCodeBar dropdown showing two accounts](assets/screenshot.png)
 
-## Why
+## What makes it different
 
-If you live in Claude (Claude Code) or Codex, you keep hitting invisible walls: the **5‑hour session** limit and the **weekly** cap. You never really know where you stand until you get cut off mid‑thought. LLMCodeBar puts that number in your menu bar, color‑coded, so you can glance at it and stop guessing.
+Plenty of menu bar apps already show your Claude or Codex usage, and they do it fine. LLMCodeBar exists for two things those don't do:
 
-## What it does
+**1. Multiple accounts of the same provider.** Two Claude accounts and two Codex accounts? A personal one and a work one? LLMCodeBar tracks all of them at once, each in its own isolated login window so they never step on each other. Every account gets its own row in the dropdown.
 
-- Sits in your menu bar and shows the usage % of the account you choose.
-- Click it for a dropdown per account: a **Session (5h)** bar and a **Weekly** bar, when each resets, and a small **7‑day trend line** that fades green → yellow → red as you approach the limit.
-- Handles **multiple accounts** for both Claude and Codex, each launched in its own isolated window so you can juggle several logins.
-- Optional **auto‑start 5h session**: when your session window is idle, it fires a tiny throwaway message on the cheapest model so the clock starts counting — handy if you want your window ticking on a predictable schedule.
+**2. Auto starting the 5 hour session.** The 5 hour window only starts counting once you send your first message, so if you're not actively using it the clock just sits there. Turn this on for an account and, whenever its session is idle, LLMCodeBar quietly sends one tiny throwaway message on the cheapest model to kick the clock off. Now your window runs (and resets) on a schedule instead of only when you remember to poke it. Works on both Claude and Codex.
 
-## How it works / where the data comes from
+That's the whole reason the app exists. Everything below is the usual usage tracking, done nicely.
 
-Everything is local and read‑only against **your own** accounts. No server, no telemetry, nothing leaves your machine except the calls to Anthropic/OpenAI you'd be making anyway.
+## The rest
 
-- It finds your signed‑in Claude/Codex desktop profiles in `~/Library/Application Support` and reads the account email/plan from the local app data.
-- For live usage it reuses **your existing session**:
-  - **Claude** — reads the session cookies (from the running Claude window's debug port, or the encrypted cookie store) and calls the same `claude.ai` usage endpoint the web app uses.
-  - **Codex** — uses the OAuth token the Codex CLI already stored (`auth.json`) and calls the ChatGPT backend usage endpoint.
-- The only things it saves are a small config and a 7‑day rolling history of usage numbers (for the sparklines), in Application Support.
+- Sits in your menu bar and shows the usage % of whichever account you pick.
+- Click it for a dropdown per account: a Session (5h) bar, a Weekly bar, when each one resets, and a little 7 day trend line that fades from green to red as you get closer to the limit.
+- Refreshes as often as every 30 seconds.
+- Launches at login if you want, so it's just always there.
 
-Heads up: these are the apps' **unofficial** internal endpoints, so they can change. Subscription tier is inferred from local billing signals, so it's a best guess (a paid Claude account shows as "Pro").
+## How it works (and where the data comes from)
 
-## The keychain prompt (and how to stop it)
+Everything is local and read only against your own accounts. No server, no tracking, nothing leaves your machine except the calls to Anthropic and OpenAI you'd be making anyway.
 
-When the Claude app isn't running, LLMCodeBar decrypts Claude's cookie store to read usage, and macOS guards that key behind a keychain prompt. To make it stop asking every launch:
+- It finds your signed in Claude and Codex desktop profiles in `~/Library/Application Support` and reads the account email and plan straight from the local app data.
+- For the live numbers it reuses the session you already have:
+  - Claude: reads your session cookies (from the running Claude window, or the encrypted cookie store) and calls the same claude.ai usage endpoint the web app uses.
+  - Codex: uses the OAuth token the Codex CLI already saved (`auth.json`) and calls the ChatGPT backend usage endpoint.
+- The only things it keeps are a small config file and a 7 day rolling history of usage numbers, which is what feeds the sparklines.
 
-1. When the keychain dialog appears, click **Always Allow** (not just *Allow*). LLMCodeBar then caches the key in its *own* keychain item, so it won't ask again.
-2. Prefer it never touch the keychain? Open **Settings → uncheck "Auto‑approve cookie access."** Usage then only refreshes while the Claude app is open (it reads cookies from the live window — no prompt).
+Fair warning: these are the apps' own internal endpoints, not official public ones, so they can change on you. The auto start and the multi account launching lean on the same internal machinery.
 
-Rebuilding from source changes the app's signature, so macOS may ask once more after that — normal for an unsigned app.
+## Making the keychain prompt go away
+
+When the Claude app isn't running, LLMCodeBar has to decrypt Claude's cookie store to read usage, and macOS guards that key with a password prompt. Two ways to shut it up:
+
+1. When the keychain box pops up, hit **Always Allow** (not just Allow). After that LLMCodeBar stashes the key in its own keychain item, so it stops asking.
+2. Or keep it away from the keychain entirely: open Settings and uncheck **Auto approve cookie access**. Then it only refreshes while the Claude app is open, reading cookies from the live window, no prompt.
+
+(Rebuilding from source changes the app signature, so macOS might ask one more time after that. Normal for an unsigned app.)
 
 ## Install
 
-Download **`LLMCodeBar.dmg`** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, and drag **LLMCodeBar** into Applications.
+Grab **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag LLMCodeBar into Applications.
 
-Since it isn't signed with a paid Apple Developer ID, Gatekeeper will grumble the first time ("cannot be opened because Apple cannot check it…"). One‑time fix — pick either:
+I haven't paid Apple for a Developer ID, so Gatekeeper will whine the first time ("cannot be opened because Apple cannot check it"). One time fix, pick one:
 
-- **Right‑click the app → Open → Open**, or
+- right click the app, Open, then Open again, or
 - run `xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"`
 
-Then it just lives in your menu bar. Flip on **Launch at login** in Settings to keep it there.
+Then it just sits in your menu bar. Turn on **Launch at login** in Settings to keep it there.
 
-**Requirements:** macOS 13 (Ventura) or later · universal (Apple Silicon + Intel) · the Claude and/or Codex desktop apps installed and signed in.
+**Needs:** macOS 13 (Ventura) or newer, universal so it runs on both Apple Silicon and Intel, and the Claude and/or Codex desktop apps installed and signed in.
 
-## Build from source
+## Build it yourself
 
-Plain Swift + AppKit, compiled with `swiftc` — no Xcode project, no dependencies.
+Plain Swift and AppKit, built with `swiftc`. No Xcode project, no dependencies.
 
 ```sh
 git clone https://github.com/Franciskid/LLMCodeBar.git
 cd LLMCodeBar
-./scripts/install.sh   # build → /Applications → launch
+./scripts/install.sh   # build, drop in /Applications, launch
 # ./scripts/build.sh   # just build to dist/
 # ./scripts/dmg.sh     # build the .dmg installer
 ```
 
-Source is split by feature under `src/` (models, cookie readers, usage refresher, menu views, settings, session auto‑start, …).
+Source is split by feature under `src/`.
 
 ## Settings
 
-- **Refresh every** — 30 s to 30 min.
-- **Show this account's 5h % in the menu bar** — which account the menu‑bar number tracks (one at a time).
-- **Show 7‑day trend sparklines**.
-- **Auto‑approve cookie access** — the keychain behavior above.
-- **Auto‑start 5h session** (per account) — the throwaway‑message trick. Claude works; Codex is experimental.
+- **Refresh every**: 30s up to 30min.
+- **Show this account's 5h % in the menu bar**: which account the menu bar number follows, one at a time.
+- **Show 7 day trend sparklines**.
+- **Auto approve cookie access**: the keychain thing above.
+- **Auto start 5h session** (per account): the throwaway message trick, for Claude and Codex.
 
 ## Honest caveats
 
-- Unofficial endpoints — they may break when the providers change things.
-- Unsigned — you do the Gatekeeper dance once.
-- Subscription tier is a local guess.
-- Auto‑start sends a real (tiny) message to your account. That's the whole point, but it does spend a sliver of quota.
+- These are unofficial endpoints, they might break when the providers change stuff.
+- The app is unsigned, so you do the Gatekeeper dance once.
+- Subscription tier is a local guess (paid Claude shows as Pro).
+- Auto start sends a real (tiny) message to your account. That's the whole point, but yeah, it spends a sliver of quota.
 
 ## License
 
-MIT — do what you like.
+MIT, do whatever you want.
