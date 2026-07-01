@@ -1,89 +1,80 @@
 # LLMCodeBar
 
-A tiny macOS menu bar app for people juggling several Claude and Codex accounts, with one trick the other usage trackers don't have: it can automatically start your 5 hour session so the clock is always running.
+Menu bar app to keep an eye on your Claude and Codex usage.
+
+The main reason it exists: it handles multiple accounts of the same provider (like two Claude accounts), and it can automatically start your 5 hour session for you. Most usage bar apps don't do either.
 
 ![LLMCodeBar dropdown showing two accounts](assets/screenshot.png)
 
-## What makes it different
+## What it does
 
-Plenty of menu bar apps already show your Claude or Codex usage, and they do it fine. LLMCodeBar exists for two things those don't do:
+- Shows your Claude and Codex usage in the menu bar: the 5 hour session limit and the weekly one.
+- Handles as many accounts as you want, including several from the same provider. Each one opens in its own isolated window so they don't clash.
+- Can auto start the 5 hour session. The window only starts counting once you send a message, so if an account is sitting idle the app sends a tiny message on the cheapest model to start the clock. Works for Claude and Codex, you turn it on per account.
+- Click the icon for a dropdown: each account with a Session (5h) bar, a Weekly bar, the reset times, and a 7 day trend line that goes green to red as you get close to the limit.
+- Refreshes anywhere from every 30 seconds to every 30 minutes, your call.
+- Can launch at login.
 
-**1. Multiple accounts of the same provider.** Two Claude accounts and two Codex accounts? A personal one and a work one? LLMCodeBar tracks all of them at once, each in its own isolated login window so they never step on each other. Every account gets its own row in the dropdown.
+## How it gets the data
 
-**2. Auto starting the 5 hour session.** The 5 hour window only starts counting once you send your first message, so if you're not actively using it the clock just sits there. Turn this on for an account and, whenever its session is idle, LLMCodeBar quietly sends one tiny throwaway message on the cheapest model to kick the clock off. Now your window runs (and resets) on a schedule instead of only when you remember to poke it. Works on both Claude and Codex.
+It's all local and read only, on your own accounts. Nothing leaves your machine except the requests to Anthropic and OpenAI you'd be making anyway.
 
-That's the whole reason the app exists. Everything below is the usual usage tracking, done nicely.
+- It reads your signed in Claude and Codex profiles from `~/Library/Application Support` to get the account email and plan.
+- For the live usage it uses the session you already have:
+  - Claude: reads your session cookies (from the running Claude window or the encrypted cookie store) and hits the same claude.ai usage endpoint the web app uses.
+  - Codex: uses the OAuth token the Codex CLI saved in `auth.json` and hits the ChatGPT backend usage endpoint.
+- It saves a small config file and a 7 day history of usage numbers for the sparklines. That's it.
 
-## The rest
+These are the apps' internal endpoints, not official ones, so they can break if the providers change them.
 
-- Sits in your menu bar and shows the usage % of whichever account you pick.
-- Click it for a dropdown per account: a Session (5h) bar, a Weekly bar, when each one resets, and a little 7 day trend line that fades from green to red as you get closer to the limit.
-- Refreshes as often as every 30 seconds.
-- Launches at login if you want, so it's just always there.
+## The keychain password prompt
 
-## How it works (and where the data comes from)
+When the Claude app isn't running, LLMCodeBar decrypts Claude's cookie store to read usage, and macOS asks for your password to unlock the key. To stop it asking every time:
 
-Everything is local and read only against your own accounts. No server, no tracking, nothing leaves your machine except the calls to Anthropic and OpenAI you'd be making anyway.
+- Click **Always Allow** when the prompt shows up (not just Allow). The app caches the key after that so it won't ask again.
+- Or open Settings and uncheck **Auto approve cookie access**. Then it never touches the keychain, and usage only updates while the Claude app is open.
 
-- It finds your signed in Claude and Codex desktop profiles in `~/Library/Application Support` and reads the account email and plan straight from the local app data.
-- For the live numbers it reuses the session you already have:
-  - Claude: reads your session cookies (from the running Claude window, or the encrypted cookie store) and calls the same claude.ai usage endpoint the web app uses.
-  - Codex: uses the OAuth token the Codex CLI already saved (`auth.json`) and calls the ChatGPT backend usage endpoint.
-- The only things it keeps are a small config file and a 7 day rolling history of usage numbers, which is what feeds the sparklines.
-
-Fair warning: these are the apps' own internal endpoints, not official public ones, so they can change on you. The auto start and the multi account launching lean on the same internal machinery.
-
-## Making the keychain prompt go away
-
-When the Claude app isn't running, LLMCodeBar has to decrypt Claude's cookie store to read usage, and macOS guards that key with a password prompt. Two ways to shut it up:
-
-1. When the keychain box pops up, hit **Always Allow** (not just Allow). After that LLMCodeBar stashes the key in its own keychain item, so it stops asking.
-2. Or keep it away from the keychain entirely: open Settings and uncheck **Auto approve cookie access**. Then it only refreshes while the Claude app is open, reading cookies from the live window, no prompt.
-
-(Rebuilding from source changes the app signature, so macOS might ask one more time after that. Normal for an unsigned app.)
+Rebuilding from source changes the app signature, so macOS might ask once more after that.
 
 ## Install
 
-Grab **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag LLMCodeBar into Applications.
+Download **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
 
-I haven't paid Apple for a Developer ID, so Gatekeeper will whine the first time ("cannot be opened because Apple cannot check it"). One time fix, pick one:
+It's not signed with an Apple Developer ID, so the first time macOS will say it can't check it. Either right click the app and pick Open, or run:
 
-- right click the app, Open, then Open again, or
-- run `xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"`
+```sh
+xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"
+```
 
-Then it just sits in your menu bar. Turn on **Launch at login** in Settings to keep it there.
-
-**Needs:** macOS 13 (Ventura) or newer, universal so it runs on both Apple Silicon and Intel, and the Claude and/or Codex desktop apps installed and signed in.
+Needs macOS 13 or newer. Universal build, runs on Apple Silicon and Intel. You also need the Claude and/or Codex desktop apps installed and signed in.
 
 ## Build it yourself
 
-Plain Swift and AppKit, built with `swiftc`. No Xcode project, no dependencies.
+Plain Swift and AppKit, no Xcode project, no dependencies.
 
 ```sh
 git clone https://github.com/Franciskid/LLMCodeBar.git
 cd LLMCodeBar
-./scripts/install.sh   # build, drop in /Applications, launch
+./scripts/install.sh   # build, put it in /Applications, launch
 # ./scripts/build.sh   # just build to dist/
-# ./scripts/dmg.sh     # build the .dmg installer
+# ./scripts/dmg.sh     # build the dmg
 ```
-
-Source is split by feature under `src/`.
 
 ## Settings
 
-- **Refresh every**: 30s up to 30min.
-- **Show this account's 5h % in the menu bar**: which account the menu bar number follows, one at a time.
-- **Show 7 day trend sparklines**.
-- **Auto approve cookie access**: the keychain thing above.
-- **Auto start 5h session** (per account): the throwaway message trick, for Claude and Codex.
+- Refresh interval, 30s to 30min.
+- Which account's 5h % shows in the menu bar.
+- Show the sparklines or not.
+- Auto approve cookie access (the keychain thing above).
+- Auto start 5h session, per account.
 
-## Honest caveats
+## Caveats
 
-- These are unofficial endpoints, they might break when the providers change stuff.
-- The app is unsigned, so you do the Gatekeeper dance once.
-- Subscription tier is a local guess (paid Claude shows as Pro).
-- Auto start sends a real (tiny) message to your account. That's the whole point, but yeah, it spends a sliver of quota.
+- Unofficial endpoints, might break when the providers change things.
+- Unsigned, so you deal with the Gatekeeper warning once.
+- The plan (Pro and so on) is a guess from local data.
+- Auto start sends a real message to your account. A small one, but it uses a bit of quota.
 
 ## License
 
-MIT, do whatever you want.
+MIT.
