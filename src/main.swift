@@ -1912,34 +1912,86 @@ enum Launcher {
 
         try fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
 
-        var environment = ProcessInfo.processInfo.environment
         if profile.provider == .codex {
             let codexHome = URL(fileURLWithPath: dataDir, isDirectory: true)
                 .appendingPathComponent("CodexHome", isDirectory: true)
             try fm.createDirectory(at: codexHome, withIntermediateDirectories: true)
-            environment["CODEX_HOME"] = codexHome.path
         }
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.createsNewApplicationInstance = true
-        var arguments = ["--user-data-dir=\(dataDir)"]
-        if profile.provider == .claude {
-            arguments.append("--remote-debugging-address=127.0.0.1")
-            arguments.append("--remote-debugging-port=0")
+        if let running = RunningProfileDetector.runningApplication(for: profile) {
+            running.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            return
         }
-        configuration.arguments = arguments
-        configuration.environment = environment
 
-        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
-            if let error {
-                NSLog("LLM Usage Bar launch failed for %@: %@", profile.label, error.localizedDescription)
-            }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [
+            "-na",
+            appURL.path,
+            "--args",
+            "--user-data-dir=\(dataDir)"
+        ]
+        try process.run()
+    }
+
+    static func bundleIdentifier(for appPath: String) -> String? {
+        let appURL = URL(fileURLWithPath: expanding(appPath))
+        return Bundle(url: appURL)?.bundleIdentifier
+    }
+
+    static func executableName(for appPath: String) -> String {
+        let appURL = URL(fileURLWithPath: expanding(appPath))
+        if let name = Bundle(url: appURL)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String, !name.isEmpty {
+            return name
         }
+        return appURL.deletingPathExtension().lastPathComponent
     }
 
     static func expanding(_ path: String) -> String {
         NSString(string: path).expandingTildeInPath
+    }
+}
+
+enum RunningProfileDetector {
+    static func runningProfileIDs(_ profiles: [LaunchProfile]) -> Set<String> {
+        Set(profiles.filter(isRunning).map(\.id))
+    }
+
+    static func runningApplication(for profile: LaunchProfile) -> NSRunningApplication? {
+        if let pid = mainProcessID(for: profile),
+           let app = NSRunningApplication(processIdentifier: pid) {
+            return app
+        }
+        guard isRunning(profile),
+              let bundleID = Launcher.bundleIdentifier(for: profile.appPath) else {
+            return nil
+        }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+    }
+
+    static func isRunning(_ profile: LaunchProfile) -> Bool {
+        matchingProcessOutput(for: profile)?.isEmpty == false
+    }
+
+    private static func mainProcessID(for profile: LaunchProfile) -> pid_t? {
+        guard let output = matchingProcessOutput(for: profile) else { return nil }
+        let executable = Launcher.executableName(for: profile.appPath)
+        let appMainPath = "\(Launcher.expanding(profile.appPath))/Contents/MacOS/\(executable)"
+
+        for line in output.split(separator: "\n") {
+            let text = String(line)
+            guard text.contains(appMainPath) else { continue }
+            let pieces = text.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            if let first = pieces.first, let pid = Int32(String(first)) {
+                return pid_t(pid)
+            }
+        }
+        return nil
+    }
+
+    private static func matchingProcessOutput(for profile: LaunchProfile) -> String? {
+        let dataDir = Launcher.expanding(profile.dataDir)
+        return try? ProcessRunner.run("/usr/bin/pgrep", arguments: ["-flf", dataDir], timeout: 1.5)
     }
 }
 
@@ -2260,9 +2312,6 @@ enum ProfileFormatting {
         } else if profile.signedIn == true {
             parts.append("Subscription unknown")
         }
-        if let updatedAt = profile.usage?.updatedAt {
-            parts.append("Updated \(relativeFormatter.localizedString(for: updatedAt, relativeTo: Date()))")
-        }
         return parts.joined(separator: " · ")
     }
 
@@ -2293,6 +2342,34 @@ enum ProfileFormatting {
             return ["Waiting for login in the isolated profile"]
         }
         return [isRefreshing ? "Checking account and quota..." : "Usage not refreshed yet"]
+    }
+
+    static func windowTitle(_ title: String) -> String {
+        switch title {
+        case "5h": return "Session"
+        case "Week": return "Weekly"
+        case "Sonnet week": return "Sonnet"
+        default: return title
+        }
+    }
+
+    static func usedText(for window: UsageWindow) -> String {
+        "\(Int(window.usedPercent.rounded()))% used"
+    }
+
+    static func resetText(for window: UsageWindow) -> String {
+        guard let resetsAt = window.resetsAt else { return "Reset unavailable" }
+        let seconds = max(0, Int(resetsAt.timeIntervalSince(Date())))
+        let days = seconds / 86400
+        let hours = (seconds % 86400) / 3600
+        let minutes = (seconds % 3600) / 60
+        if days > 0 {
+            return "Resets in \(days)d \(hours)h"
+        }
+        if hours > 0 {
+            return "Resets in \(hours)h \(minutes)m"
+        }
+        return "Resets in \(max(1, minutes))m"
     }
 
     static func primaryUsagePercent(for profile: LaunchProfile) -> Double? {
@@ -2381,6 +2458,9 @@ final class UsageBarView: NSView {
     var usedPercent: Double? {
         didSet { needsDisplay = true }
     }
+    var accentColor: NSColor = .systemGreen {
+        didSet { needsDisplay = true }
+    }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: 124, height: 6)
@@ -2395,9 +2475,84 @@ final class UsageBarView: NSView {
         let percent = max(0, min(1, usedPercent / 100))
         let fillWidth = rect.width * CGFloat(percent)
         let fillRect = NSRect(x: rect.minX, y: rect.minY, width: fillWidth, height: rect.height)
-        let color: NSColor = usedPercent >= 90 ? .systemRed : (usedPercent >= 70 ? .systemOrange : .systemGreen)
-        color.setFill()
+        accentColor.setFill()
         NSBezierPath(roundedRect: fillRect, xRadius: 3, yRadius: 3).fill()
+    }
+}
+
+final class StatusDotView: NSView {
+    var isRunning = false {
+        didSet { needsDisplay = true }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 8, height: 8)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let color = isRunning ? NSColor.systemGreen : NSColor.tertiaryLabelColor.withAlphaComponent(0.5)
+        color.setFill()
+        NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+    }
+}
+
+final class QuotaWindowView: NSView {
+    init(window: UsageWindow) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 310, height: 38))
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: ProfileFormatting.windowTitle(window.title))
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        title.textColor = .labelColor
+
+        let used = NSTextField(labelWithString: ProfileFormatting.usedText(for: window))
+        used.translatesAutoresizingMaskIntoConstraints = false
+        used.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        used.textColor = .secondaryLabelColor
+
+        let reset = NSTextField(labelWithString: ProfileFormatting.resetText(for: window))
+        reset.translatesAutoresizingMaskIntoConstraints = false
+        reset.font = .systemFont(ofSize: 10.5, weight: .regular)
+        reset.textColor = .tertiaryLabelColor
+
+        let bar = UsageBarView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.usedPercent = window.usedPercent
+        bar.accentColor = Self.color(for: window.usedPercent)
+
+        addSubview(title)
+        addSubview(used)
+        addSubview(bar)
+        addSubview(reset)
+
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor),
+            title.topAnchor.constraint(equalTo: topAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: used.leadingAnchor, constant: -8),
+
+            used.trailingAnchor.constraint(equalTo: trailingAnchor),
+            used.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
+
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
+            bar.heightAnchor.constraint(equalToConstant: 6),
+
+            reset.trailingAnchor.constraint(equalTo: trailingAnchor),
+            reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 3),
+            reset.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor)
+        ])
+    }
+
+    private static func color(for usedPercent: Double) -> NSColor {
+        if usedPercent >= 90 { return .systemRed }
+        if usedPercent >= 70 { return .systemOrange }
+        return .systemGreen
+    }
+
+    required init?(coder: NSCoder) {
+        nil
     }
 }
 
@@ -2405,101 +2560,96 @@ final class ProfileMenuItemView: NSView {
     private let profileID: String
     private weak var actionTarget: AnyObject?
     private let action: Selector
-    private let openButton = NSButton(title: "", target: nil, action: nil)
 
-    init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool) {
+    init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool) {
         self.profileID = profile.id
         self.actionTarget = target
         self.action = action
-        super.init(frame: NSRect(x: 0, y: 0, width: 560, height: 98))
+        let windowCount = max(1, min(2, profile.usage?.windows.count ?? 0))
+        super.init(frame: NSRect(x: 0, y: 0, width: 420, height: CGFloat(62 + windowCount * 42)))
         identifier = NSUserInterfaceItemIdentifier(profileID)
 
         let appIcon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
-        appIcon.size = NSSize(width: 30, height: 30)
+        appIcon.size = NSSize(width: 28, height: 28)
         let icon = NSImageView(image: appIcon)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
 
         let title = NSTextField(labelWithString: ProfileFormatting.title(for: profile))
         title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.font = .systemFont(ofSize: 13.5, weight: .semibold)
         title.lineBreakMode = .byTruncatingMiddle
 
         let subtitle = NSTextField(labelWithString: ProfileFormatting.subtitle(for: profile))
         subtitle.translatesAutoresizingMaskIntoConstraints = false
-        subtitle.font = .systemFont(ofSize: 11.5)
+        subtitle.font = .systemFont(ofSize: 11.5, weight: .medium)
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingTail
 
-        let usageLabels = ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).map { line -> NSTextField in
-            let label = NSTextField(labelWithString: line)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.font = .monospacedDigitSystemFont(ofSize: 11.2, weight: .medium)
-            label.textColor = .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingTail
-            return label
-        }
+        let dot = StatusDotView()
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.isRunning = isRunning
 
-        let usageStack = NSStackView(views: usageLabels)
-        usageStack.translatesAutoresizingMaskIntoConstraints = false
-        usageStack.orientation = .vertical
-        usageStack.spacing = 1
-        usageStack.alignment = .leading
+        let running = NSTextField(labelWithString: isRunning ? "Open" : "Closed")
+        running.translatesAutoresizingMaskIntoConstraints = false
+        running.font = .systemFont(ofSize: 10.5, weight: .medium)
+        running.textColor = isRunning ? .systemGreen : .tertiaryLabelColor
 
-        let bar = UsageBarView()
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.usedPercent = ProfileFormatting.primaryUsagePercent(for: profile)
+        let statusStack = NSStackView(views: [dot, running])
+        statusStack.translatesAutoresizingMaskIntoConstraints = false
+        statusStack.orientation = .horizontal
+        statusStack.spacing = 5
+        statusStack.alignment = .centerY
 
-        let textStack = NSStackView(views: [title, subtitle, usageStack, bar])
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        textStack.orientation = .vertical
-        textStack.spacing = 3
-        textStack.alignment = .leading
-
-        openButton.translatesAutoresizingMaskIntoConstraints = false
-        openButton.identifier = NSUserInterfaceItemIdentifier(profileID)
-        openButton.target = self
-        openButton.action = #selector(performOpen(_:))
-        openButton.bezelStyle = .rounded
-        openButton.toolTip = "Open \(profile.label)"
-        if let openImage = NSImage(systemSymbolName: "arrow.up.forward.square", accessibilityDescription: "Open") {
-            openButton.image = openImage
-            openButton.imagePosition = .imageOnly
+        let quotaViews: [NSView]
+        if let windows = profile.usage?.windows, !windows.isEmpty {
+            quotaViews = windows.prefix(2).map { QuotaWindowView(window: $0) }
         } else {
-            openButton.title = "Open"
+            let label = NSTextField(labelWithString: ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).first ?? "Usage unavailable")
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.font = .systemFont(ofSize: 11, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            quotaViews = [label]
         }
+
+        let quotaStack = NSStackView(views: quotaViews)
+        quotaStack.translatesAutoresizingMaskIntoConstraints = false
+        quotaStack.orientation = .vertical
+        quotaStack.spacing = 7
+        quotaStack.alignment = .leading
 
         addSubview(icon)
-        addSubview(textStack)
-        addSubview(openButton)
+        addSubview(title)
+        addSubview(subtitle)
+        addSubview(statusStack)
+        addSubview(quotaStack)
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
-            icon.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            icon.widthAnchor.constraint(equalToConstant: 30),
-            icon.heightAnchor.constraint(equalToConstant: 30),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            icon.widthAnchor.constraint(equalToConstant: 28),
+            icon.heightAnchor.constraint(equalToConstant: 28),
 
-            textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
-            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -14),
+            statusStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            statusStack.topAnchor.constraint(equalTo: topAnchor, constant: 16),
 
-            bar.widthAnchor.constraint(equalToConstant: 180),
-            bar.heightAnchor.constraint(equalToConstant: 6),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: statusStack.leadingAnchor, constant: -10),
 
-            openButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
-            openButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            openButton.widthAnchor.constraint(equalToConstant: 34),
-            openButton.heightAnchor.constraint(equalToConstant: 30)
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+            subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
+            quotaStack.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            quotaStack.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 10),
+            quotaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            quotaStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10)
         ])
     }
 
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        if !openButton.frame.contains(point) {
-            performOpen(self)
-            return
-        }
-        super.mouseDown(with: event)
+        performOpen(self)
     }
 
     @objc private func performOpen(_ sender: Any?) {
@@ -2537,9 +2687,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
+            let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
             for profile in config.profiles {
                 let item = NSMenuItem()
-                item.view = ProfileMenuItemView(profile: profile, target: self, action: #selector(openProfileButton(_:)), isRefreshing: refreshInFlight)
+                item.view = ProfileMenuItemView(
+                    profile: profile,
+                    target: self,
+                    action: #selector(openProfileButton(_:)),
+                    isRefreshing: refreshInFlight,
+                    isRunning: runningIDs.contains(profile.id))
                 menu.addItem(item)
             }
         }
@@ -2684,6 +2840,50 @@ if CommandLine.arguments.contains("--prove-quota-json") {
         print(text)
     }
     exit(0)
+}
+
+if CommandLine.arguments.contains("--dump-running-json") {
+    let config = ConfigStore.shared.load()
+    let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
+    let rows: [[String: Any]] = config.profiles.map { profile in
+        [
+            "provider": profile.provider.rawValue,
+            "email": profile.accountEmail ?? "",
+            "plan": profile.accountPlan ?? "",
+            "dataDir": Launcher.expanding(profile.dataDir),
+            "running": runningIDs.contains(profile.id)
+        ]
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys]),
+       let text = String(data: data, encoding: .utf8) {
+        print(text)
+    }
+    exit(0)
+}
+
+if let launchIndex = CommandLine.arguments.firstIndex(of: "--launch-profile-email"),
+   CommandLine.arguments.indices.contains(launchIndex + 1) {
+    let email = CommandLine.arguments[launchIndex + 1].lowercased()
+    let providerIndex = CommandLine.arguments.firstIndex(of: "--provider")
+    let provider = providerIndex.flatMap { index -> Provider? in
+        guard CommandLine.arguments.indices.contains(index + 1) else { return nil }
+        return Provider(rawValue: CommandLine.arguments[index + 1])
+    }
+    let config = ConfigStore.shared.load()
+    guard let profile = config.profiles.first(where: { profile in
+        profile.accountEmail?.lowercased() == email && (provider == nil || profile.provider == provider)
+    }) else {
+        print("No profile found for \(provider?.rawValue ?? "any provider") \(email)")
+        exit(2)
+    }
+    do {
+        try Launcher.launch(profile)
+        print("Launched \(profile.provider.rawValue) \(profile.accountEmail ?? profile.label)")
+        exit(0)
+    } catch {
+        print("Launch failed: \(error.localizedDescription)")
+        exit(1)
+    }
 }
 
 let app = NSApplication.shared
