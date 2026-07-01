@@ -8,7 +8,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let appPathField = NSTextField()
     private let dataDirField = NSTextField()
     private let providerPopup = NSPopUpButton()
-    private let launchAtLogin = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
+    private let launchAtLogin = NSButton(checkboxWithTitle: "Launch LLMCodeBar at login", target: nil, action: nil)
     private let autoApproveCookies = NSButton(checkboxWithTitle: "Auto-approve cookie access", target: nil, action: nil)
     private let showSparklines = NSButton(checkboxWithTitle: "Show 7-day trend sparklines", target: nil, action: nil)
     private let menuBarAccount = NSButton(checkboxWithTitle: "Show this account's 5h % in the menu bar", target: nil, action: nil)
@@ -98,7 +98,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         leftPane.spacing = 8
 
         providerPopup.addItems(withTitles: Provider.allCases.map(\.rawValue))
-        launchAtLogin.state = config.launchAtLogin ? .on : .off
+        launchAtLogin.state = (config.launchAtLogin || AutostartManager.isEnabled) ? .on : .off
+        launchAtLogin.toolTip = "Start LLMCodeBar itself automatically when you log in to your Mac. (Not the Claude or Codex apps.)"
         autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off
         autoApproveCookies.toolTip = "Reads the encrypted cookie store to fetch live usage. macOS asks to approve keychain access once - click \"Always Allow\". Uncheck to never prompt; usage then updates only while Claude/Codex is open."
 

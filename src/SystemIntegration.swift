@@ -1,12 +1,38 @@
 import AppKit
+import ServiceManagement
 
 enum AutostartManager {
     static func sync(enabled: Bool) {
+        // Prefer the modern login-item API (shows under System Settings > General >
+        // Login Items). Fall back to a user LaunchAgent if it refuses (e.g. an
+        // unsigned/ad-hoc build), which still relaunches the app on login.
+        if #available(macOS 13.0, *) {
+            let service = SMAppService.mainApp
+            do {
+                if enabled {
+                    if service.status != .enabled { try service.register() }
+                } else if service.status == .enabled {
+                    try service.unregister()
+                }
+                try? FileManager.default.removeItem(at: Paths.shared.launchAgentURL)
+                return
+            } catch {
+                // fall through to the LaunchAgent approach
+            }
+        }
         if enabled {
             install()
         } else {
             try? FileManager.default.removeItem(at: Paths.shared.launchAgentURL)
         }
+    }
+
+    /// The real current state, so the checkbox can reflect what macOS actually has.
+    static var isEnabled: Bool {
+        if #available(macOS 13.0, *), SMAppService.mainApp.status == .enabled {
+            return true
+        }
+        return FileManager.default.fileExists(atPath: Paths.shared.launchAgentURL.path)
     }
 
     private static func install() {
