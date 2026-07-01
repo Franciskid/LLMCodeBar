@@ -183,9 +183,10 @@ enum AccountResolver {
 
         let email = preferredEmail(from: emails, provider: provider)
         let name = preferredName(from: names, excluding: email, provider: provider)
+        let displayName = (email == nil || (name?.contains(" ") == true)) ? name : nil
 
-        if email != nil || name != nil {
-            return AccountIdentity(displayName: name, email: email, isSignedIn: true)
+        if email != nil || displayName != nil {
+            return AccountIdentity(displayName: displayName, email: email, isSignedIn: true)
         }
 
         if provider == .codex && signedIn {
@@ -330,7 +331,15 @@ enum AccountResolver {
             "Personne 1",
             "Personne 1",
             "Web Store",
-            "Chromium PDF Viewer"
+            "Chromium PDF Viewer",
+            "Anthropic",
+            "Stable",
+            "Auto",
+            "All users",
+            "Auto full",
+            "Auto Stage3",
+            "Auto Main Cohort",
+            "M108 and Above"
         ])
 
         for rawName in names {
