@@ -15,8 +15,16 @@ struct LaunchProfile: Codable, Identifiable {
     var accountName: String?
     var accountEmail: String?
     var signedIn: Bool?
+    var accountPlan: String?
+    var quotaSummary: String?
+    var quotaSource: String?
+    var billingType: String?
+    var accountUUID: String?
+    var isUserAdded: Bool?
+    var isPendingLogin: Bool?
+    var createdAt: Date?
 
-    static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity) -> LaunchProfile {
+    static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity, isUserAdded: Bool = false) -> LaunchProfile {
         let account = identity.displayName ?? identity.email ?? "Signed-in account"
         return LaunchProfile(
             id: UUID().uuidString,
@@ -26,8 +34,51 @@ struct LaunchProfile: Codable, Identifiable {
             dataDir: dataDir,
             accountName: identity.displayName,
             accountEmail: identity.email,
-            signedIn: identity.isSignedIn
+            signedIn: identity.isSignedIn,
+            accountPlan: identity.planName,
+            quotaSummary: identity.quotaSummary,
+            quotaSource: identity.quotaSource,
+            billingType: identity.billingType,
+            accountUUID: identity.accountUUID,
+            isUserAdded: isUserAdded,
+            isPendingLogin: false,
+            createdAt: Date()
         )
+    }
+
+    static func pending(provider: Provider, appPath: String, dataDir: String) -> LaunchProfile {
+        LaunchProfile(
+            id: UUID().uuidString,
+            label: "\(provider.rawValue) - Connect account",
+            provider: provider,
+            appPath: appPath,
+            dataDir: dataDir,
+            accountName: nil,
+            accountEmail: nil,
+            signedIn: false,
+            accountPlan: nil,
+            quotaSummary: "Waiting for login",
+            quotaSource: nil,
+            billingType: nil,
+            accountUUID: nil,
+            isUserAdded: true,
+            isPendingLogin: true,
+            createdAt: Date()
+        )
+    }
+
+    mutating func apply(identity: AccountIdentity) {
+        let account = identity.displayName ?? identity.email ?? "Signed-in account"
+        label = "\(provider.rawValue) - \(account)"
+        accountName = identity.displayName
+        accountEmail = identity.email
+        signedIn = identity.isSignedIn
+        accountPlan = identity.planName
+        quotaSummary = identity.quotaSummary
+        quotaSource = identity.quotaSource
+        billingType = identity.billingType
+        accountUUID = identity.accountUUID
+        isPendingLogin = false
     }
 }
 
@@ -35,6 +86,11 @@ struct AccountIdentity {
     var displayName: String?
     var email: String?
     var isSignedIn: Bool
+    var planName: String?
+    var quotaSummary: String?
+    var quotaSource: String?
+    var billingType: String?
+    var accountUUID: String?
 
     var hasUsableLabel: Bool {
         displayName != nil || email != nil || isSignedIn
@@ -51,6 +107,7 @@ final class Paths {
 
     let appSupport: URL
     let configURL: URL
+    let profilesURL: URL
     let launchAgentURL: URL
 
     private init() {
@@ -58,12 +115,14 @@ final class Paths {
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         appSupport = support.appendingPathComponent("LLM Usage Bar", isDirectory: true)
         configURL = appSupport.appendingPathComponent("config.json")
+        profilesURL = appSupport.appendingPathComponent("Profiles", isDirectory: true)
         launchAgentURL = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/fr.fraserv.llmusagebar.plist")
     }
 
     func ensureSupportDirectory() {
         try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: profilesURL, withIntermediateDirectories: true)
     }
 }
 
@@ -80,19 +139,12 @@ final class ConfigStore {
         Paths.shared.ensureSupportDirectory()
         guard let data = try? Data(contentsOf: Paths.shared.configURL),
               let existing = try? decoder.decode(AppConfig.self, from: data) else {
-            let config = AppConfig(launchAtLogin: false, profiles: inferProfiles())
+            let config = AppConfig(launchAtLogin: false, profiles: inferProfiles(existing: []))
             save(config)
             return config
         }
 
-        var config = AppConfig(launchAtLogin: existing.launchAtLogin, profiles: inferProfiles())
-        let previousByPath = Dictionary(uniqueKeysWithValues: existing.profiles.map { ("\($0.provider.rawValue)|\($0.dataDir)", $0) })
-        for index in config.profiles.indices {
-            let key = "\(config.profiles[index].provider.rawValue)|\(config.profiles[index].dataDir)"
-            if let previous = previousByPath[key] {
-                config.profiles[index].id = previous.id
-            }
-        }
+        let config = AppConfig(launchAtLogin: existing.launchAtLogin, profiles: inferProfiles(existing: existing.profiles))
         save(config)
         return config
     }
@@ -105,8 +157,11 @@ final class ConfigStore {
         AutostartManager.sync(enabled: config.launchAtLogin)
     }
 
-    func inferProfiles() -> [LaunchProfile] {
-        var results: [LaunchProfile] = []
+    func inferProfiles(existing: [LaunchProfile]? = nil) -> [LaunchProfile] {
+        let existingProfiles = existing ?? loadExistingProfilesWithoutInferring()
+        var resultsByKey: [String: LaunchProfile] = [:]
+        let existingByKey = Dictionary(uniqueKeysWithValues: existingProfiles.map { (profileKey(provider: $0.provider, dataDir: $0.dataDir), $0) })
+
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser.path
         let support = "\(home)/Library/Application Support"
@@ -114,50 +169,119 @@ final class ConfigStore {
         let claudeApp = "/Applications/Claude.app"
         let codexApp = "/Applications/Codex.app"
 
+        var candidates: [(provider: Provider, appPath: String, dataDir: String, userAdded: Bool)] = []
+
         if fm.fileExists(atPath: claudeApp) {
-            let base = "\(support)/Claude"
-            if let identity = AccountResolver.identity(in: base, provider: .claude) {
-                results.append(.make(provider: .claude, appPath: claudeApp, dataDir: base, identity: identity))
-            }
+            candidates.append((.claude, claudeApp, "\(support)/Claude", false))
             if let dirs = try? fm.contentsOfDirectory(atPath: support) {
                 for dir in dirs.sorted() where dir.hasPrefix("Claude-") {
                     let path = "\(support)/\(dir)"
                     var isDir: ObjCBool = false
-                    if fm.fileExists(atPath: path, isDirectory: &isDir),
-                       isDir.boolValue,
-                       let identity = AccountResolver.identity(in: path, provider: .claude) {
-                        results.append(.make(provider: .claude, appPath: claudeApp, dataDir: path, identity: identity))
+                    if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                        candidates.append((.claude, claudeApp, path, false))
                     }
                 }
             }
         }
 
         if fm.fileExists(atPath: codexApp) {
-            let candidates = [
+            [
                 "\(support)/Codex",
                 "\(support)/com.openai.codex"
             ]
-            for candidate in candidates where fm.fileExists(atPath: candidate) {
-                if let identity = AccountResolver.identity(in: candidate, provider: .codex) {
-                    results.append(.make(provider: .codex, appPath: codexApp, dataDir: candidate, identity: identity))
+            .forEach { candidate in
+                if fm.fileExists(atPath: candidate) {
+                    candidates.append((.codex, codexApp, candidate, false))
                 }
             }
         }
 
-        return deduplicate(results)
-    }
+        candidates.append(contentsOf: generatedProfileCandidates())
+        candidates.append(contentsOf: existingProfiles.map { profile in
+            (profile.provider, profile.appPath, profile.dataDir, profile.isUserAdded == true)
+        })
 
-    private func deduplicate(_ profiles: [LaunchProfile]) -> [LaunchProfile] {
-        var seen = Set<String>()
-        var output: [LaunchProfile] = []
-        for profile in profiles {
-            let key = "\(profile.provider.rawValue)|\(profile.dataDir)"
-            if !seen.contains(key) {
-                seen.insert(key)
-                output.append(profile)
+        for candidate in candidates {
+            let key = profileKey(provider: candidate.provider, dataDir: candidate.dataDir)
+            var profile = existingByKey[key]
+            let identity = AccountResolver.identity(in: candidate.dataDir, provider: candidate.provider)
+
+            if var existingProfile = profile {
+                existingProfile.appPath = candidate.appPath
+                if let identity {
+                    existingProfile.apply(identity: identity)
+                }
+                if candidate.userAdded {
+                    existingProfile.isUserAdded = true
+                }
+                if identity != nil || existingProfile.isUserAdded == true {
+                    resultsByKey[key] = existingProfile
+                }
+                continue
+            }
+
+            if let identity {
+                profile = .make(provider: candidate.provider, appPath: candidate.appPath, dataDir: candidate.dataDir, identity: identity, isUserAdded: candidate.userAdded)
+                resultsByKey[key] = profile
             }
         }
-        return output
+
+        return resultsByKey.values.sorted { lhs, rhs in
+            if lhs.provider.rawValue != rhs.provider.rawValue {
+                return lhs.provider.rawValue < rhs.provider.rawValue
+            }
+            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+        }
+    }
+
+    func createPendingProfile(provider: Provider) -> LaunchProfile {
+        Paths.shared.ensureSupportDirectory()
+        let appPath = defaultAppPath(for: provider)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let dataDir = Paths.shared.profilesURL
+            .appendingPathComponent(provider.rawValue, isDirectory: true)
+            .appendingPathComponent(stamp, isDirectory: true)
+            .path
+        try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+        return .pending(provider: provider, appPath: appPath, dataDir: dataDir)
+    }
+
+    private func loadExistingProfilesWithoutInferring() -> [LaunchProfile] {
+        guard let data = try? Data(contentsOf: Paths.shared.configURL),
+              let config = try? decoder.decode(AppConfig.self, from: data) else {
+            return []
+        }
+        return config.profiles
+    }
+
+    private func generatedProfileCandidates() -> [(provider: Provider, appPath: String, dataDir: String, userAdded: Bool)] {
+        let fm = FileManager.default
+        var candidates: [(Provider, String, String, Bool)] = []
+
+        for provider in Provider.allCases {
+            let dir = Paths.shared.profilesURL.appendingPathComponent(provider.rawValue, isDirectory: true)
+            guard let children = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) else {
+                continue
+            }
+            for child in children {
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: child.path, isDirectory: &isDir), isDir.boolValue {
+                    candidates.append((provider, defaultAppPath(for: provider), child.path, true))
+                }
+            }
+        }
+        return candidates
+    }
+
+    private func defaultAppPath(for provider: Provider) -> String {
+        switch provider {
+        case .claude: return "/Applications/Claude.app"
+        case .codex: return "/Applications/Codex.app"
+        }
+    }
+
+    private func profileKey(provider: Provider, dataDir: String) -> String {
+        "\(provider.rawValue)|\(Launcher.expanding(dataDir))"
     }
 }
 
@@ -167,14 +291,22 @@ enum AccountResolver {
         let files = relevantFiles(under: root)
         var emails: [String] = []
         var names: [String] = []
+        var billingTypes: [String] = []
+        var accountUUIDs: [String] = []
+        var quotaSignals: [String] = []
         var signedIn = false
 
         for file in files {
             guard let text = readableText(from: file) else { continue }
             emails.append(contentsOf: extractEmails(from: text))
             names.append(contentsOf: extractNamedValues(from: text))
+            billingTypes.append(contentsOf: captureMatches(pattern: #""billing_type"\s*:\s*"([^"]+)""#, in: text))
+            accountUUIDs.append(contentsOf: captureMatches(pattern: #""account_uuid"\s*:\s*"([^"]+)""#, in: text))
+            quotaSignals.append(contentsOf: quotaSignalsFrom(text: text, provider: provider))
             if text.contains("\"account_id\"") ||
                 text.contains("\"last_signed_in_username\"") ||
+                text.contains("\"email_address\"") ||
+                text.contains("\"account_uuid\"") ||
                 text.contains("sessionKey") ||
                 text.contains("lastSignedIn") {
                 signedIn = true
@@ -184,13 +316,36 @@ enum AccountResolver {
         let email = preferredEmail(from: emails, provider: provider)
         let name = preferredName(from: names, excluding: email, provider: provider)
         let displayName = (email == nil || (name?.contains(" ") == true)) ? name : nil
+        let billingType = billingTypes.first
+        let accountUUID = accountUUIDs.first
+        let planName = planName(provider: provider, billingType: billingType, quotaSignals: quotaSignals)
+        let quotaSummary = quotaSummary(provider: provider, quotaSignals: quotaSignals)
+        let quotaSource = quotaSummary == nil ? nil : "local app cache"
 
         if email != nil || displayName != nil {
-            return AccountIdentity(displayName: displayName, email: email, isSignedIn: true)
+            return AccountIdentity(
+                displayName: displayName,
+                email: email,
+                isSignedIn: true,
+                planName: planName,
+                quotaSummary: quotaSummary,
+                quotaSource: quotaSource,
+                billingType: billingType,
+                accountUUID: accountUUID
+            )
         }
 
         if provider == .codex && signedIn {
-            return AccountIdentity(displayName: nil, email: nil, isSignedIn: true)
+            return AccountIdentity(
+                displayName: nil,
+                email: nil,
+                isSignedIn: true,
+                planName: planName,
+                quotaSummary: quotaSummary,
+                quotaSource: quotaSource,
+                billingType: billingType,
+                accountUUID: accountUUID
+            )
         }
 
         return nil
@@ -207,7 +362,15 @@ enum AccountResolver {
             "Local State",
             "config.json",
             "bridge-state.json",
-            "buddy-tokens.json"
+            "buddy-tokens.json",
+            "Default/Preferences",
+            "Default/Secure Preferences",
+            "Default/Account Web Data",
+            "Default/Login Data For Account",
+            "Default/Partitions/codex-browser-app/Preferences",
+            "Default/Partitions/codex-browser-app/Secure Preferences",
+            "Default/Partitions/codex-browser-app/Account Web Data",
+            "Default/Partitions/codex-browser-app/Login Data For Account"
         ]
 
         for name in directNames {
@@ -220,10 +383,8 @@ enum AccountResolver {
         let relativeDirs = [
             "Local Storage/leveldb",
             "Session Storage",
-            "Default",
             "Default/Local Storage/leveldb",
             "Default/Session Storage",
-            "Default/Partitions/codex-browser-app",
             "Default/Partitions/codex-browser-app/Local Storage/leveldb",
             "Default/Partitions/codex-browser-app/Session Storage"
         ]
@@ -269,7 +430,7 @@ enum AccountResolver {
         }
 
         if let text = String(data: data, encoding: .utf8) {
-            return text
+            return normalizeStorageText(text)
         }
 
         let bytes = data.map { byte -> UInt8 in
@@ -278,7 +439,14 @@ enum AccountResolver {
             }
             return 32
         }
-        return String(bytes: bytes, encoding: .utf8)
+        return String(bytes: bytes, encoding: .utf8).map(normalizeStorageText)
+    }
+
+    private static func normalizeStorageText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\u{0}", with: "")
+            .replacingOccurrences(of: "\\u0022", with: "\"")
+            .replacingOccurrences(of: "\\\"", with: "\"")
     }
 
     private static func extractEmails(from text: String) -> [String] {
@@ -292,8 +460,8 @@ enum AccountResolver {
 
     private static func extractNamedValues(from text: String) -> [String] {
         let patterns = [
-            #""(?:displayName|display_name|fullName|full_name|name|email|userEmail|user_email)"\s*:\s*"([^"]{3,120})""#,
-            #"(?:displayName|display_name|fullName|full_name|name|email|userEmail|user_email)\\?":\\?"([^"\\]{3,120})\\?""#
+            #""(?:displayName|display_name|fullName|full_name|full_name|name|email|email_address|userEmail|user_email)"\s*:\s*"([^"]{3,120})""#,
+            #"(?:displayName|display_name|fullName|full_name|name|email|email_address|userEmail|user_email)\\?":\\?"([^"\\]{3,120})\\?""#
         ]
         return patterns.flatMap { pattern in
             captureMatches(pattern: pattern, in: text)
@@ -358,6 +526,66 @@ enum AccountResolver {
             return name
         }
         return nil
+    }
+
+    private static func planName(provider: Provider, billingType: String?, quotaSignals: [String]) -> String? {
+        if let explicitPlan = quotaSignals.first(where: { signal in
+            let lower = signal.lowercased()
+            return lower.contains("pro") || lower.contains("max") || lower.contains("team") || lower.contains("plus")
+        }) {
+            return explicitPlan
+        }
+
+        switch provider {
+        case .claude:
+            if billingType == "stripe_subscription" {
+                return "Paid subscription"
+            }
+        case .codex:
+            if quotaSignals.contains(where: { $0.lowercased().contains("workspace_credits") || $0.lowercased().contains("rate_limit") }) {
+                return "Signed-in subscription"
+            }
+        }
+
+        return nil
+    }
+
+    private static func quotaSummary(provider: Provider, quotaSignals: [String]) -> String? {
+        switch provider {
+        case .claude:
+            if quotaSignals.contains(where: { $0.lowercased().contains("billing_type") }) {
+                return "subscription detected; remaining window not cached"
+            }
+        case .codex:
+            let lower = quotaSignals.map { $0.lowercased() }
+            if lower.contains(where: { $0.contains("rate_limit_reset") }) {
+                return "rate-limit metadata cached; exact remaining quota not cached"
+            }
+            if lower.contains(where: { $0.contains("workspace_credits") }) {
+                return "workspace credit metadata cached"
+            }
+        }
+        return nil
+    }
+
+    private static func quotaSignalsFrom(text: String, provider: Provider) -> [String] {
+        var signals: [String] = []
+        let patterns = [
+            #""billing_type"\s*:\s*"([^"]+)""#,
+            #""(?:membership|plan|subscription|rate_limit_reset|workspace_credits|remaining_threshold_percent|free_plan_upgrade_cta|go_usage_setting|codex_turn[^"]*)"\s*:?\s*"?([^",}\]]{1,120})"?"#
+        ]
+
+        for pattern in patterns {
+            signals.append(contentsOf: captureMatches(pattern: pattern, in: text))
+        }
+
+        if provider == .codex {
+            for token in ["rate_limit_reset", "workspace_credits", "free_plan_upgrade_cta", "go_usage_setting"] where text.contains(token) {
+                signals.append(token)
+            }
+        }
+
+        return Array(Set(signals))
     }
 
     private static func looksLikeHumanName(_ value: String) -> Bool {
@@ -537,12 +765,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         statusLabel.textColor = .secondaryLabelColor
         form.addArrangedSubview(statusLabel)
 
+        let addButton = NSButton(title: "Add Account...", target: self, action: #selector(addAccount))
         let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeProfile))
         let inferButton = NSButton(title: "Infer Connected Accounts", target: self, action: #selector(inferExisting))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(save))
         saveButton.keyEquivalent = "\r"
 
-        let buttons = NSStackView(views: [removeButton, inferButton, saveButton])
+        let buttons = NSStackView(views: [addButton, removeButton, inferButton, saveButton])
         buttons.translatesAutoresizingMaskIntoConstraints = false
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -593,7 +822,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         providerPopup.selectItem(withTitle: profile.provider.rawValue)
         appPathField.stringValue = profile.appPath
         dataDirField.stringValue = profile.dataDir
-        statusLabel.stringValue = profile.accountEmail ?? profile.accountName ?? "Signed-in account detected; exact account name is not exposed locally."
+        statusLabel.stringValue = statusText(for: profile)
     }
 
     private func writeSelection() {
@@ -603,6 +832,70 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         config.profiles[row].provider = Provider(rawValue: providerPopup.titleOfSelectedItem ?? "Claude") ?? .claude
         config.profiles[row].appPath = appPathField.stringValue
         config.profiles[row].dataDir = dataDirField.stringValue
+    }
+
+    private func statusText(for profile: LaunchProfile) -> String {
+        if profile.isPendingLogin == true {
+            return "Waiting for login in the isolated \(profile.provider.rawValue) window."
+        }
+
+        var parts: [String] = []
+        if let email = profile.accountEmail {
+            parts.append(email)
+        } else if let name = profile.accountName {
+            parts.append(name)
+        } else if profile.signedIn == true {
+            parts.append("Signed in; exact account name is not exposed locally.")
+        }
+
+        if let plan = profile.accountPlan {
+            parts.append("Plan: \(plan)")
+        }
+
+        if let quota = profile.quotaSummary {
+            parts.append("Quota: \(quota)")
+        }
+
+        return parts.isEmpty ? "No connected account detected in this profile." : parts.joined(separator: "   ")
+    }
+
+    @objc private func addAccount() {
+        writeSelection()
+
+        let alert = NSAlert()
+        alert.messageText = "Add Account"
+        alert.informativeText = "Choose the app to open in a new isolated profile, then sign in there. LLM Usage Bar will detect the account automatically."
+        alert.addButton(withTitle: "Open Login Window")
+        alert.addButton(withTitle: "Cancel")
+
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+        picker.addItems(withTitles: Provider.allCases.map(\.rawValue))
+        if let selected = providerPopup.titleOfSelectedItem {
+            picker.selectItem(withTitle: selected)
+        }
+        alert.accessoryView = picker
+
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let provider = Provider(rawValue: picker.titleOfSelectedItem ?? "") else {
+            return
+        }
+
+        var profile = ConfigStore.shared.createPendingProfile(provider: provider)
+        config.profiles.append(profile)
+        onSave(config)
+        table.reloadData()
+        table.selectRowIndexes(IndexSet(integer: config.profiles.count - 1), byExtendingSelection: false)
+
+        do {
+            try Launcher.launch(profile)
+            statusLabel.stringValue = "Opened \(provider.rawValue). Sign in there; this list will update automatically."
+        } catch {
+            profile.quotaSummary = "Could not open login window: \(error.localizedDescription)"
+            config.profiles[config.profiles.count - 1] = profile
+            onSave(config)
+            table.reloadData()
+            statusLabel.stringValue = profile.quotaSummary ?? "Could not open login window."
+        }
     }
 
     @objc private func removeProfile() {
@@ -617,12 +910,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func inferExisting() {
         writeSelection()
-        let inferred = ConfigStore.shared.inferProfiles()
+        let selectedID = selectedProfileID()
+        let selectedProvider = selectedProviderValue()
+        let inferred = ConfigStore.shared.inferProfiles(existing: config.profiles)
         config.profiles = inferred
         table.reloadData()
-        if !config.profiles.isEmpty {
-            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        }
+        restoreSelection(id: selectedID, provider: selectedProvider)
         statusLabel.stringValue = "Inferred \(inferred.count) connected account(s)."
     }
 
@@ -632,6 +925,45 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         onSave(config)
         statusLabel.stringValue = "Saved."
         table.reloadData()
+    }
+
+    func refreshFromDiskPreservingSelection() {
+        let selectedID = selectedProfileID()
+        let selectedProvider = selectedProviderValue()
+        config = ConfigStore.shared.load()
+        table.reloadData()
+        restoreSelection(id: selectedID, provider: selectedProvider)
+    }
+
+    private func selectedProfileID() -> String? {
+        let row = table.selectedRow
+        guard row >= 0, row < config.profiles.count else { return nil }
+        return config.profiles[row].id
+    }
+
+    private func selectedProviderValue() -> Provider? {
+        let row = table.selectedRow
+        guard row >= 0, row < config.profiles.count else { return nil }
+        return config.profiles[row].provider
+    }
+
+    private func restoreSelection(id: String?, provider: Provider?) {
+        guard !config.profiles.isEmpty else {
+            loadSelection()
+            return
+        }
+
+        if let id, let row = config.profiles.firstIndex(where: { $0.id == id }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            return
+        }
+
+        if let provider, let row = config.profiles.firstIndex(where: { $0.provider == provider }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            return
+        }
+
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
     }
 }
 
@@ -646,7 +978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "LLM"
         rebuildMenu()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.rebuildMenu()
+            self?.refresh()
         }
     }
 
@@ -679,9 +1011,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let note = NSMenuItem(title: "Subscription quota: unavailable until real provider adapter is connected", action: nil, keyEquivalent: "")
-        note.isEnabled = false
-        menu.addItem(note)
+        let addClaude = NSMenuItem(title: "Add Claude Account...", action: #selector(addClaudeAccount), keyEquivalent: "")
+        addClaude.target = self
+        menu.addItem(addClaude)
+
+        let addCodex = NSMenuItem(title: "Add Codex Account...", action: #selector(addCodexAccount), keyEquivalent: "")
+        addCodex.target = self
+        menu.addItem(addCodex)
 
         menu.addItem(NSMenuItem.separator())
         let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
@@ -701,16 +1037,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func accountSummary(for profile: LaunchProfile) -> String {
+        var base: String
         if let email = profile.accountEmail, let name = profile.accountName {
-            return "\(profile.provider.rawValue): \(name) <\(email)>"
+            base = "\(profile.provider.rawValue): \(name) <\(email)>"
+        } else if let email = profile.accountEmail {
+            base = "\(profile.provider.rawValue): \(email)"
+        } else if let name = profile.accountName {
+            base = "\(profile.provider.rawValue): \(name)"
+        } else if profile.isPendingLogin == true {
+            return "\(profile.provider.rawValue): waiting for login"
+        } else {
+            base = "\(profile.provider.rawValue): signed-in account"
         }
-        if let email = profile.accountEmail {
-            return "\(profile.provider.rawValue): \(email)"
+
+        var details: [String] = []
+        if let plan = profile.accountPlan {
+            details.append(plan)
         }
-        if let name = profile.accountName {
-            return "\(profile.provider.rawValue): \(name)"
+        if let quota = profile.quotaSummary {
+            details.append(quota)
         }
-        return "\(profile.provider.rawValue): signed-in account"
+        return details.isEmpty ? base : "\(base) - \(details.joined(separator: " - "))"
     }
 
     @objc private func openProfile(_ sender: NSMenuItem) {
@@ -738,7 +1085,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refresh() {
         config = ConfigStore.shared.load()
+        settingsWindow?.refreshFromDiskPreservingSelection()
         rebuildMenu()
+    }
+
+    @objc private func addClaudeAccount() {
+        addAccount(provider: .claude)
+    }
+
+    @objc private func addCodexAccount() {
+        addAccount(provider: .codex)
+    }
+
+    private func addAccount(provider: Provider) {
+        var newConfig = ConfigStore.shared.load()
+        let profile = ConfigStore.shared.createPendingProfile(provider: provider)
+        newConfig.profiles.append(profile)
+        config = newConfig
+        ConfigStore.shared.save(newConfig)
+        rebuildMenu()
+        do {
+            try Launcher.launch(profile)
+        } catch {
+            showError("Could not open \(provider.rawValue) login window: \(error.localizedDescription)")
+        }
     }
 
     @objc private func quit() {
@@ -752,6 +1122,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.runModal()
     }
+}
+
+if CommandLine.arguments.contains("--dump-inferred-json") {
+    let config = ConfigStore.shared.load()
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(config), let text = String(data: data, encoding: .utf8) {
+        print(text)
+    }
+    exit(0)
 }
 
 let app = NSApplication.shared

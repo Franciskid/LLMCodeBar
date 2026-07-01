@@ -6,11 +6,14 @@ Native macOS menu bar app for launching isolated Claude/Codex desktop profiles a
 
 - Menu bar dropdown with Claude and Codex profiles.
 - Settings window for adding/removing/editing profiles.
+- `Add Account...` opens Claude or Codex in a new isolated profile folder so you can sign in there.
+- Pending account rows are kept and refreshed until the app detects login data.
 - Connected-account inference from existing support folders such as:
   - `~/Library/Application Support/Claude`
   - `~/Library/Application Support/Claude-*`
   - `~/Library/Application Support/Codex`
   - `~/Library/Application Support/com.openai.codex`
+  - `~/Library/Application Support/LLM Usage Bar/Profiles/...`
 - Real account labels are used when the local app profile exposes a name or email.
 - Profiles without connected-account evidence are ignored.
 - Isolated launches using the app executable plus `--user-data-dir=<profile folder>`.
@@ -18,7 +21,7 @@ Native macOS menu bar app for launching isolated Claude/Codex desktop profiles a
 
 ## Important quota note
 
-Claude and Codex subscription-window quotas are provider-side, dynamic, and not currently exposed through a stable public desktop API. This app does not invent local quota percentages. It shows connected accounts and leaves quota as unavailable until a real provider adapter can scrape a dashboard or call a private/official endpoint.
+Claude and Codex subscription-window quotas are provider-side and dynamic. This app does not invent local quota percentages. It scans the real local app cache for billing, plan, and quota/rate-limit metadata. If the exact remaining 5-hour or weekly quota is not cached by the provider app, the row says that instead of guessing.
 
 Codex may store the signed-in username hashed/encrypted in Chromium `Secure Preferences`. In that case the app can detect that a Codex account is signed in, but cannot always display the real email/name without a provider-side query.
 
@@ -27,6 +30,12 @@ Codex may store the signed-in username hashed/encrypted in Chromium `Secure Pref
 ```sh
 ./scripts/build.sh
 open "dist/LLM Usage Bar.app"
+```
+
+Verify inference without opening the UI:
+
+```sh
+"dist/LLM Usage Bar.app/Contents/MacOS/LLMUsageBar" --dump-inferred-json
 ```
 
 To install into `/Applications`:
