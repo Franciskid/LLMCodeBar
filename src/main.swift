@@ -23,6 +23,8 @@ struct LaunchProfile: Codable, Identifiable {
     var isUserAdded: Bool?
     var isPendingLogin: Bool?
     var createdAt: Date?
+    var scanSignature: String?
+    var scanUpdatedAt: Date?
 
     static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity, isUserAdded: Bool = false) -> LaunchProfile {
         let account = identity.displayName ?? identity.email ?? "Signed-in account"
@@ -42,7 +44,9 @@ struct LaunchProfile: Codable, Identifiable {
             accountUUID: identity.accountUUID,
             isUserAdded: isUserAdded,
             isPendingLogin: false,
-            createdAt: Date()
+            createdAt: Date(),
+            scanSignature: nil,
+            scanUpdatedAt: nil
         )
     }
 
@@ -57,13 +61,15 @@ struct LaunchProfile: Codable, Identifiable {
             accountEmail: nil,
             signedIn: false,
             accountPlan: nil,
-            quotaSummary: "Waiting for login",
+            quotaSummary: nil,
             quotaSource: nil,
             billingType: nil,
             accountUUID: nil,
             isUserAdded: true,
             isPendingLogin: true,
-            createdAt: Date()
+            createdAt: Date(),
+            scanSignature: nil,
+            scanUpdatedAt: nil
         )
     }
 
@@ -73,11 +79,17 @@ struct LaunchProfile: Codable, Identifiable {
         accountName = identity.displayName
         accountEmail = identity.email
         signedIn = identity.isSignedIn
-        accountPlan = identity.planName
+        if let planName = identity.planName {
+            accountPlan = planName
+        }
         quotaSummary = identity.quotaSummary
         quotaSource = identity.quotaSource
-        billingType = identity.billingType
-        accountUUID = identity.accountUUID
+        if let identityBillingType = identity.billingType {
+            billingType = identityBillingType
+        }
+        if let identityAccountUUID = identity.accountUUID {
+            accountUUID = identityAccountUUID
+        }
         isPendingLogin = false
     }
 }
@@ -204,17 +216,29 @@ final class ConfigStore {
         for candidate in candidates {
             let key = profileKey(provider: candidate.provider, dataDir: candidate.dataDir)
             var profile = existingByKey[key]
-            let identity = AccountResolver.identity(in: candidate.dataDir, provider: candidate.provider)
+            let signature = AccountResolver.signature(in: candidate.dataDir)
+            let recentlyScanned = profile?.scanUpdatedAt.map { Date().timeIntervalSince($0) < 300 } ?? false
+            let needsScan = profile == nil || profile?.isPendingLogin == true || (profile?.scanSignature != signature && !recentlyScanned)
+            let identity = needsScan ? AccountResolver.identity(in: candidate.dataDir, provider: candidate.provider) : nil
 
             if var existingProfile = profile {
                 existingProfile.appPath = candidate.appPath
                 if let identity {
                     existingProfile.apply(identity: identity)
+                    existingProfile.scanSignature = signature
+                    existingProfile.scanUpdatedAt = Date()
+                } else if needsScan {
+                    existingProfile.scanSignature = signature
+                    existingProfile.scanUpdatedAt = Date()
                 }
                 if candidate.userAdded {
                     existingProfile.isUserAdded = true
                 }
-                if identity != nil || existingProfile.isUserAdded == true {
+                if identity != nil ||
+                    existingProfile.isUserAdded == true ||
+                    existingProfile.signedIn == true ||
+                    existingProfile.accountEmail != nil ||
+                    existingProfile.accountName != nil {
                     resultsByKey[key] = existingProfile
                 }
                 continue
@@ -222,6 +246,8 @@ final class ConfigStore {
 
             if let identity {
                 profile = .make(provider: candidate.provider, appPath: candidate.appPath, dataDir: candidate.dataDir, identity: identity, isUserAdded: candidate.userAdded)
+                profile?.scanSignature = signature
+                profile?.scanUpdatedAt = Date()
                 resultsByKey[key] = profile
             }
         }
@@ -286,6 +312,19 @@ final class ConfigStore {
 }
 
 enum AccountResolver {
+    private static let maxReadableBytes = 1_500_000
+    private static let maxFilesPerStore = 8
+    private static let maxBlobFilesPerStore = 16
+
+    static func signature(in dataDir: String) -> String {
+        let root = URL(fileURLWithPath: Launcher.expanding(dataDir))
+        return relevantFiles(under: root).map { file in
+            let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+            return "\(file.path):\(values?.fileSize ?? 0):\(modified)"
+        }.joined(separator: "|")
+    }
+
     static func identity(in dataDir: String, provider: Provider) -> AccountIdentity? {
         let root = URL(fileURLWithPath: Launcher.expanding(dataDir))
         let files = relevantFiles(under: root)
@@ -293,16 +332,26 @@ enum AccountResolver {
         var names: [String] = []
         var billingTypes: [String] = []
         var accountUUIDs: [String] = []
-        var quotaSignals: [String] = []
+        var planSignals: [String] = []
         var signedIn = false
 
         for file in files {
             guard let text = readableText(from: file) else { continue }
-            emails.append(contentsOf: extractEmails(from: text))
-            names.append(contentsOf: extractNamedValues(from: text))
-            billingTypes.append(contentsOf: captureMatches(pattern: #""billing_type"\s*:\s*"([^"]+)""#, in: text))
-            accountUUIDs.append(contentsOf: captureMatches(pattern: #""account_uuid"\s*:\s*"([^"]+)""#, in: text))
-            quotaSignals.append(contentsOf: quotaSignalsFrom(text: text, provider: provider))
+            if text.contains("@") {
+                emails.append(contentsOf: extractEmails(from: text))
+            }
+            if containsAny(["displayName", "display_name", "fullName", "full_name", "name", "email_address", "userEmail", "user_email"], in: text) {
+                names.append(contentsOf: extractNamedValues(from: text))
+            }
+            if text.contains("\"billing_type\"") {
+                billingTypes.append(contentsOf: captureMatches(pattern: #""billing_type"\s*:\s*"([^"]+)""#, in: text))
+            }
+            if text.contains("\"account_uuid\"") {
+                accountUUIDs.append(contentsOf: captureMatches(pattern: #""account_uuid"\s*:\s*"([^"]+)""#, in: text))
+            }
+            if containsAny(["membership", "plan", "subscription", "billing_plan", "account_plan"], in: text) {
+                planSignals.append(contentsOf: planSignalsFrom(text: text))
+            }
             if text.contains("\"account_id\"") ||
                 text.contains("\"last_signed_in_username\"") ||
                 text.contains("\"email_address\"") ||
@@ -318,9 +367,7 @@ enum AccountResolver {
         let displayName = (email == nil || (name?.contains(" ") == true)) ? name : nil
         let billingType = billingTypes.first
         let accountUUID = accountUUIDs.first
-        let planName = planName(provider: provider, billingType: billingType, quotaSignals: quotaSignals)
-        let quotaSummary = quotaSummary(provider: provider, quotaSignals: quotaSignals)
-        let quotaSource = quotaSummary == nil ? nil : "local app cache"
+        let planName = planName(provider: provider, billingType: billingType, planSignals: planSignals)
 
         if email != nil || displayName != nil {
             return AccountIdentity(
@@ -328,8 +375,8 @@ enum AccountResolver {
                 email: email,
                 isSignedIn: true,
                 planName: planName,
-                quotaSummary: quotaSummary,
-                quotaSource: quotaSource,
+                quotaSummary: nil,
+                quotaSource: nil,
                 billingType: billingType,
                 accountUUID: accountUUID
             )
@@ -341,8 +388,8 @@ enum AccountResolver {
                 email: nil,
                 isSignedIn: true,
                 planName: planName,
-                quotaSummary: quotaSummary,
-                quotaSource: quotaSource,
+                quotaSummary: nil,
+                quotaSource: nil,
                 billingType: billingType,
                 accountUUID: accountUUID
             )
@@ -365,81 +412,106 @@ enum AccountResolver {
             "buddy-tokens.json",
             "Default/Preferences",
             "Default/Secure Preferences",
-            "Default/Account Web Data",
-            "Default/Login Data For Account",
             "Default/Partitions/codex-browser-app/Preferences",
-            "Default/Partitions/codex-browser-app/Secure Preferences",
-            "Default/Partitions/codex-browser-app/Account Web Data",
-            "Default/Partitions/codex-browser-app/Login Data For Account"
+            "Default/Partitions/codex-browser-app/Secure Preferences"
         ]
 
         for name in directNames {
             let file = root.appendingPathComponent(name)
-            if fm.fileExists(atPath: file.path) {
+            if fm.fileExists(atPath: file.path), isReadableCandidate(file) {
                 files.append(file)
             }
         }
 
-        let relativeDirs = [
-            "Local Storage/leveldb",
-            "Session Storage",
-            "Default/Local Storage/leveldb",
-            "Default/Session Storage",
-            "Default/Partitions/codex-browser-app/Local Storage/leveldb",
-            "Default/Partitions/codex-browser-app/Session Storage"
+        let storageDirs: [(path: String, recursive: Bool, allowExtensionless: Bool, limit: Int)] = [
+            ("Local Storage/leveldb", false, false, maxFilesPerStore),
+            ("Session Storage", false, false, maxFilesPerStore),
+            ("IndexedDB/https_claude.ai_0.indexeddb.leveldb", false, false, maxFilesPerStore),
+            ("IndexedDB/https_claude.ai_0.indexeddb.blob", true, true, maxBlobFilesPerStore),
+            ("Default/Local Storage/leveldb", false, false, maxFilesPerStore),
+            ("Default/Session Storage", false, false, maxFilesPerStore),
+            ("Default/IndexedDB/https_claude.ai_0.indexeddb.leveldb", false, false, maxFilesPerStore),
+            ("Default/IndexedDB/https_claude.ai_0.indexeddb.blob", true, true, maxBlobFilesPerStore),
+            ("Default/IndexedDB/https_chatgpt.com_0.indexeddb.leveldb", false, false, maxFilesPerStore),
+            ("Default/Partitions/codex-browser-app/Local Storage/leveldb", false, false, maxFilesPerStore),
+            ("Default/Partitions/codex-browser-app/Session Storage", false, false, maxFilesPerStore),
+            ("Default/Partitions/codex-browser-app/IndexedDB/https_chatgpt.com_0.indexeddb.leveldb", false, false, maxFilesPerStore)
         ]
 
-        for relativeDir in relativeDirs {
-            let dir = root.appendingPathComponent(relativeDir)
-            guard let enumerator = fm.enumerator(
-                at: dir,
-                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) else {
-                continue
-            }
-
-            for case let file as URL in enumerator {
-                guard isRelevantFile(file) else { continue }
-                files.append(file)
-            }
+        for storageDir in storageDirs {
+            let dir = root.appendingPathComponent(storageDir.path)
+            files.append(contentsOf: relevantStoreFiles(
+                in: dir,
+                recursive: storageDir.recursive,
+                allowExtensionless: storageDir.allowExtensionless,
+                limit: storageDir.limit
+            ))
         }
 
-        return Array(Set(files)).sorted { $0.path < $1.path }
+        return Array(Set(files)).sorted {
+            modificationDate($0) > modificationDate($1)
+        }
     }
 
-    private static func isRelevantFile(_ file: URL) -> Bool {
+    private static func relevantStoreFiles(in dir: URL, recursive: Bool, allowExtensionless: Bool, limit: Int) -> [URL] {
+        let fm = FileManager.default
+        var files: [URL] = []
+        if recursive {
+            guard let enumerator = fm.enumerator(
+                at: dir,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return []
+            }
+            for case let file as URL in enumerator where isRelevantFile(file, allowExtensionless: allowExtensionless) && isReadableCandidate(file) {
+                files.append(file)
+            }
+        } else if let entries = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            files = entries.filter { isRelevantFile($0, allowExtensionless: allowExtensionless) && isReadableCandidate($0) }
+        }
+
+        return Array(files.sorted {
+            modificationDate($0) > modificationDate($1)
+        }.prefix(limit))
+    }
+
+    private static func modificationDate(_ file: URL) -> Date {
+        (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    private static func isRelevantFile(_ file: URL, allowExtensionless: Bool = false) -> Bool {
         let name = file.lastPathComponent
         let allowedNames = [
             "Preferences",
             "Secure Preferences",
-            "Local State",
-            "Account Web Data",
-            "Login Data For Account"
+            "Local State"
         ]
         if allowedNames.contains(name) { return true }
-        return name.hasSuffix(".ldb") || name.hasSuffix(".log")
+        if name.hasSuffix(".ldb") || name.hasSuffix(".log") { return true }
+        return allowExtensionless && !name.contains(".")
+    }
+
+    private static func isReadableCandidate(_ file: URL) -> Bool {
+        guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              (values.fileSize ?? 0) <= maxReadableBytes else {
+            return false
+        }
+        return true
     }
 
     private static func readableText(from file: URL) -> String? {
-        guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-              values.isRegularFile == true,
-              (values.fileSize ?? 0) <= 8_000_000,
+        guard isReadableCandidate(file),
               let data = try? Data(contentsOf: file) else {
             return nil
         }
 
-        if let text = String(data: data, encoding: .utf8) {
-            return normalizeStorageText(text)
-        }
-
-        let bytes = data.map { byte -> UInt8 in
-            if byte == 9 || byte == 10 || byte == 13 || (byte >= 32 && byte <= 126) {
-                return byte
-            }
-            return 32
-        }
-        return String(bytes: bytes, encoding: .utf8).map(normalizeStorageText)
+        return normalizeStorageText(String(decoding: data, as: UTF8.self))
     }
 
     private static func normalizeStorageText(_ text: String) -> String {
@@ -477,8 +549,19 @@ enum AccountResolver {
             "sourceware.org"
         ]
         let filtered = emails.filter { email in
-            guard let domain = email.split(separator: "@").last else { return false }
-            if blockedDomains.contains(String(domain)) { return false }
+            let parts = email.split(separator: "@")
+            guard parts.count == 2,
+                  parts[0].count >= 2,
+                  let domain = parts.last else { return false }
+            let domainText = String(domain)
+            let domainParts = domainText.split(separator: ".")
+            guard domainParts.count >= 2,
+                  let tld = domainParts.last,
+                  tld.count >= 2,
+                  !["oa", "png", "jpg", "jpeg", "gif", "webp", "svg", "local"].contains(String(tld)) else {
+                return false
+            }
+            if blockedDomains.contains(domainText) { return false }
             if email.contains("opengraph-image") { return false }
             return true
         }
@@ -486,9 +569,10 @@ enum AccountResolver {
         if provider == .claude {
             return filtered.first
         }
-        return filtered.first { email in
+        let likelyAccountEmail = filtered.first { email in
             email.contains("openai") || email.contains("gmail") || email.contains("icloud") || email.contains("francois") || email.contains("francis")
-        } ?? filtered.first
+        }
+        return provider == .codex ? likelyAccountEmail : (likelyAccountEmail ?? filtered.first)
     }
 
     private static func preferredName(from names: [String], excluding email: String?, provider: Provider) -> String? {
@@ -528,8 +612,8 @@ enum AccountResolver {
         return nil
     }
 
-    private static func planName(provider: Provider, billingType: String?, quotaSignals: [String]) -> String? {
-        if let explicitPlan = quotaSignals.first(where: { signal in
+    private static func planName(provider: Provider, billingType: String?, planSignals: [String]) -> String? {
+        if let explicitPlan = planSignals.first(where: { signal in
             let lower = signal.lowercased()
             return lower.contains("pro") || lower.contains("max") || lower.contains("team") || lower.contains("plus")
         }) {
@@ -542,47 +626,21 @@ enum AccountResolver {
                 return "Paid subscription"
             }
         case .codex:
-            if quotaSignals.contains(where: { $0.lowercased().contains("workspace_credits") || $0.lowercased().contains("rate_limit") }) {
-                return "Signed-in subscription"
-            }
+            return nil
         }
 
         return nil
     }
 
-    private static func quotaSummary(provider: Provider, quotaSignals: [String]) -> String? {
-        switch provider {
-        case .claude:
-            if quotaSignals.contains(where: { $0.lowercased().contains("billing_type") }) {
-                return "subscription detected; remaining window not cached"
-            }
-        case .codex:
-            let lower = quotaSignals.map { $0.lowercased() }
-            if lower.contains(where: { $0.contains("rate_limit_reset") }) {
-                return "rate-limit metadata cached; exact remaining quota not cached"
-            }
-            if lower.contains(where: { $0.contains("workspace_credits") }) {
-                return "workspace credit metadata cached"
-            }
-        }
-        return nil
-    }
-
-    private static func quotaSignalsFrom(text: String, provider: Provider) -> [String] {
+    private static func planSignalsFrom(text: String) -> [String] {
         var signals: [String] = []
         let patterns = [
             #""billing_type"\s*:\s*"([^"]+)""#,
-            #""(?:membership|plan|subscription|rate_limit_reset|workspace_credits|remaining_threshold_percent|free_plan_upgrade_cta|go_usage_setting|codex_turn[^"]*)"\s*:?\s*"?([^",}\]]{1,120})"?"#
+            #""(?:membership|plan|subscription|billing_plan|account_plan)"\s*:?\s*"?([^",}\]]{1,120})"?"#
         ]
 
         for pattern in patterns {
             signals.append(contentsOf: captureMatches(pattern: pattern, in: text))
-        }
-
-        if provider == .codex {
-            for token in ["rate_limit_reset", "workspace_credits", "free_plan_upgrade_cta", "go_usage_setting"] where text.contains(token) {
-                signals.append(token)
-            }
         }
 
         return Array(Set(signals))
@@ -622,6 +680,10 @@ enum AccountResolver {
             }
             return String(text[matchRange])
         }
+    }
+
+    private static func containsAny(_ needles: [String], in text: String) -> Bool {
+        needles.contains { text.range(of: $0, options: [.caseInsensitive]) != nil }
     }
 }
 
@@ -663,17 +725,13 @@ enum Launcher {
     static func launch(_ profile: LaunchProfile) throws {
         let fm = FileManager.default
         let appURL = URL(fileURLWithPath: expanding(profile.appPath))
-        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
-        let info = NSDictionary(contentsOf: infoURL)
-        let executableName = info?["CFBundleExecutable"] as? String ?? appURL.deletingPathExtension().lastPathComponent
-        let executableURL = appURL.appendingPathComponent("Contents/MacOS/\(executableName)")
         let dataDir = expanding(profile.dataDir)
 
         try fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
 
         let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["--user-data-dir=\(dataDir)"]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", "-a", appURL.path, "--args", "--user-data-dir=\(dataDir)"]
         process.environment = ProcessInfo.processInfo.environment
         try process.run()
     }
@@ -748,6 +806,24 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         table.rowHeight = 30
         scroll.documentView = table
 
+        let listTitle = NSTextField(labelWithString: "Accounts")
+        listTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let addAccountButton = NSButton(title: "+", target: self, action: #selector(addAccount))
+        addAccountButton.bezelStyle = .rounded
+        addAccountButton.toolTip = "Add Claude or Codex account"
+        addAccountButton.widthAnchor.constraint(equalToConstant: 32).isActive = true
+
+        let listHeader = NSStackView(views: [listTitle, addAccountButton])
+        listHeader.translatesAutoresizingMaskIntoConstraints = false
+        listHeader.orientation = .horizontal
+        listHeader.spacing = 8
+        listTitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let leftPane = NSStackView(views: [listHeader, scroll])
+        leftPane.translatesAutoresizingMaskIntoConstraints = false
+        leftPane.orientation = .vertical
+        leftPane.spacing = 8
+
         providerPopup.addItems(withTitles: Provider.allCases.map(\.rawValue))
         launchAtLogin.state = config.launchAtLogin ? .on : .off
 
@@ -765,28 +841,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         statusLabel.textColor = .secondaryLabelColor
         form.addArrangedSubview(statusLabel)
 
-        let addButton = NSButton(title: "Add Account...", target: self, action: #selector(addAccount))
         let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeProfile))
         let inferButton = NSButton(title: "Infer Connected Accounts", target: self, action: #selector(inferExisting))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(save))
         saveButton.keyEquivalent = "\r"
 
-        let buttons = NSStackView(views: [addButton, removeButton, inferButton, saveButton])
+        let buttons = NSStackView(views: [removeButton, inferButton, saveButton])
         buttons.translatesAutoresizingMaskIntoConstraints = false
         buttons.orientation = .horizontal
         buttons.spacing = 8
         form.addArrangedSubview(buttons)
 
-        content.addSubview(scroll)
+        content.addSubview(leftPane)
         content.addSubview(form)
 
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
-            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-            scroll.widthAnchor.constraint(equalToConstant: 230),
+            leftPane.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            leftPane.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            leftPane.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            leftPane.widthAnchor.constraint(equalToConstant: 230),
 
-            form.leadingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: 18),
+            form.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 18),
             form.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             form.topAnchor.constraint(equalTo: content.topAnchor, constant: 18)
         ])
@@ -849,11 +924,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         }
 
         if let plan = profile.accountPlan {
-            parts.append("Plan: \(plan)")
-        }
-
-        if let quota = profile.quotaSummary {
-            parts.append("Quota: \(quota)")
+            parts.append("Subscription: \(plan)")
         }
 
         return parts.isEmpty ? "No connected account detected in this profile." : parts.joined(separator: "   ")
@@ -880,7 +951,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             return
         }
 
-        var profile = ConfigStore.shared.createPendingProfile(provider: provider)
+        let profile = ConfigStore.shared.createPendingProfile(provider: provider)
         config.profiles.append(profile)
         onSave(config)
         table.reloadData()
@@ -890,11 +961,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             try Launcher.launch(profile)
             statusLabel.stringValue = "Opened \(provider.rawValue). Sign in there; this list will update automatically."
         } catch {
-            profile.quotaSummary = "Could not open login window: \(error.localizedDescription)"
             config.profiles[config.profiles.count - 1] = profile
             onSave(config)
             table.reloadData()
-            statusLabel.stringValue = profile.quotaSummary ?? "Could not open login window."
+            statusLabel.stringValue = "Could not open login window: \(error.localizedDescription)"
         }
     }
 
@@ -1011,15 +1081,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let addClaude = NSMenuItem(title: "Add Claude Account...", action: #selector(addClaudeAccount), keyEquivalent: "")
-        addClaude.target = self
-        menu.addItem(addClaude)
-
-        let addCodex = NSMenuItem(title: "Add Codex Account...", action: #selector(addCodexAccount), keyEquivalent: "")
-        addCodex.target = self
-        menu.addItem(addCodex)
-
-        menu.addItem(NSMenuItem.separator())
         let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -1054,9 +1115,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let plan = profile.accountPlan {
             details.append(plan)
         }
-        if let quota = profile.quotaSummary {
-            details.append(quota)
-        }
         return details.isEmpty ? base : "\(base) - \(details.joined(separator: " - "))"
     }
 
@@ -1087,28 +1145,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config = ConfigStore.shared.load()
         settingsWindow?.refreshFromDiskPreservingSelection()
         rebuildMenu()
-    }
-
-    @objc private func addClaudeAccount() {
-        addAccount(provider: .claude)
-    }
-
-    @objc private func addCodexAccount() {
-        addAccount(provider: .codex)
-    }
-
-    private func addAccount(provider: Provider) {
-        var newConfig = ConfigStore.shared.load()
-        let profile = ConfigStore.shared.createPendingProfile(provider: provider)
-        newConfig.profiles.append(profile)
-        config = newConfig
-        ConfigStore.shared.save(newConfig)
-        rebuildMenu()
-        do {
-            try Launcher.launch(profile)
-        } catch {
-            showError("Could not open \(provider.rawValue) login window: \(error.localizedDescription)")
-        }
     }
 
     @objc private func quit() {
