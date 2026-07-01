@@ -21,5 +21,6 @@ swiftc \
   -o "$MACOS/LLMUsageBar"
 
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
+codesign --force --deep --sign - "$APP" >/dev/null
 
 echo "Built: $APP"

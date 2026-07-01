@@ -12,8 +12,6 @@ struct LaunchProfile: Codable, Identifiable {
     var provider: Provider
     var appPath: String
     var dataDir: String
-    var fiveHourBudget: Double
-    var weeklyBudget: Double
     var accountName: String?
     var accountEmail: String?
     var signedIn: Bool?
@@ -26,8 +24,6 @@ struct LaunchProfile: Codable, Identifiable {
             provider: provider,
             appPath: appPath,
             dataDir: dataDir,
-            fiveHourBudget: 100,
-            weeklyBudget: 100,
             accountName: identity.displayName,
             accountEmail: identity.email,
             signedIn: identity.isSignedIn
@@ -50,21 +46,11 @@ struct AppConfig: Codable {
     var profiles: [LaunchProfile]
 }
 
-struct UsageEvent: Codable, Identifiable {
-    var id: String
-    var profileId: String
-    var provider: Provider
-    var date: Date
-    var units: Double
-    var note: String
-}
-
 final class Paths {
     static let shared = Paths()
 
     let appSupport: URL
     let configURL: URL
-    let eventsURL: URL
     let launchAgentURL: URL
 
     private init() {
@@ -72,7 +58,6 @@ final class Paths {
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         appSupport = support.appendingPathComponent("LLM Usage Bar", isDirectory: true)
         configURL = appSupport.appendingPathComponent("config.json")
-        eventsURL = appSupport.appendingPathComponent("usage_events.json")
         launchAgentURL = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/fr.fraserv.llmusagebar.plist")
     }
@@ -106,8 +91,6 @@ final class ConfigStore {
             let key = "\(config.profiles[index].provider.rawValue)|\(config.profiles[index].dataDir)"
             if let previous = previousByPath[key] {
                 config.profiles[index].id = previous.id
-                config.profiles[index].fiveHourBudget = previous.fiveHourBudget
-                config.profiles[index].weeklyBudget = previous.weeklyBudget
             }
         }
         save(config)
@@ -358,6 +341,7 @@ enum AccountResolver {
                   !blocked.contains(name),
                   name != email,
                   !name.contains("@"),
+                  looksLikeHumanName(name),
                   name.count >= 3,
                   name.count <= 80 else {
                 continue
@@ -365,6 +349,21 @@ enum AccountResolver {
             return name
         }
         return nil
+    }
+
+    private static func looksLikeHumanName(_ value: String) -> Bool {
+        let letterCount = value.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        guard letterCount >= 2 else { return false }
+        if value.contains(".") || value.contains("_") || value.contains(",") || value.contains("\t") {
+            return false
+        }
+        if value.rangeOfCharacter(from: .decimalDigits) != nil {
+            return false
+        }
+        return value.range(
+            of: #"^[\p{L}][\p{L} '\-]{1,78}$"#,
+            options: [.regularExpression]
+        ) != nil
     }
 
     private static func matches(pattern: String, in text: String, options: NSRegularExpression.Options = []) -> [String] {
@@ -385,52 +384,6 @@ enum AccountResolver {
                 return nil
             }
             return String(text[matchRange])
-        }
-    }
-}
-
-final class UsageStore {
-    static let shared = UsageStore()
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
-
-    private init() {
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        decoder.dateDecodingStrategy = .iso8601
-    }
-
-    func events() -> [UsageEvent] {
-        Paths.shared.ensureSupportDirectory()
-        guard let data = try? Data(contentsOf: Paths.shared.eventsURL),
-              let loaded = try? decoder.decode([UsageEvent].self, from: data) else {
-            return []
-        }
-        return loaded
-    }
-
-    func add(profile: LaunchProfile, units: Double, note: String) {
-        var all = events()
-        all.append(UsageEvent(id: UUID().uuidString, profileId: profile.id, provider: profile.provider, date: Date(), units: units, note: note))
-        save(all)
-    }
-
-    func usage(profile: LaunchProfile, interval: TimeInterval) -> Double {
-        let cutoff = Date().addingTimeInterval(-interval)
-        return events()
-            .filter { $0.profileId == profile.id && $0.date >= cutoff }
-            .reduce(0) { $0 + $1.units }
-    }
-
-    func prune() {
-        let cutoff = Date().addingTimeInterval(-60 * 60 * 24 * 30)
-        save(events().filter { $0.date >= cutoff })
-    }
-
-    private func save(_ events: [UsageEvent]) {
-        Paths.shared.ensureSupportDirectory()
-        if let data = try? encoder.encode(events) {
-            try? data.write(to: Paths.shared.eventsURL, options: .atomic)
         }
     }
 }
