@@ -125,6 +125,12 @@ final class UsageBarView: NSView {
     }
 }
 
+/// Top-left origin container so scrolled content flows first-row-first (natural
+/// downward scrolling), used as the document view of the scrollable account list.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 final class StatusDotView: NSView {
     var isRunning = false {
         didSet { needsDisplay = true }

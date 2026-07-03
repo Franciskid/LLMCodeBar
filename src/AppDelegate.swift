@@ -32,16 +32,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(empty)
         } else {
             let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
-            for profile in config.profiles {
-                let item = NSMenuItem()
-                item.view = ProfileMenuItemView(
+            let rows = config.profiles.map { profile in
+                ProfileMenuItemView(
                     profile: profile,
                     target: self,
                     action: #selector(openProfileButton(_:)),
                     isRefreshing: refreshInFlight,
                     isRunning: runningIDs.contains(profile.id),
                     showSparklines: config.showsSparklines)
+            }
+
+            if rows.count > Self.maxVisibleAccounts {
+                // Cap the account list at maxVisibleAccounts rows tall; the rest scroll,
+                // so many accounts never grow the menu past a comfortable height.
+                let item = NSMenuItem()
+                item.view = Self.makeScrollingAccountsView(rows: rows, visibleCount: Self.maxVisibleAccounts)
                 menu.addItem(item)
+            } else {
+                for row in rows {
+                    let item = NSMenuItem()
+                    item.view = row
+                    menu.addItem(item)
+                }
             }
         }
 
@@ -64,6 +76,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
 
         statusItem.menu = menu
+    }
+
+    /// Above this many accounts, the list becomes a fixed-height scroll region.
+    private static let maxVisibleAccounts = 3
+
+    /// Packs the account rows into a scroll view capped at the height of the first
+    /// `visibleCount` rows, so the menu shows that many at full size and scrolls the rest.
+    private static func makeScrollingAccountsView(rows: [ProfileMenuItemView], visibleCount: Int) -> NSView {
+        let rowWidth: CGFloat = 320
+        let visibleHeight = rows.prefix(visibleCount).reduce(CGFloat(0)) { $0 + $1.frame.height }
+
+        let stack = NSStackView(views: rows)
+        stack.orientation = .vertical
+        stack.spacing = 0
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for row in rows {
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.heightAnchor.constraint(equalToConstant: row.frame.height).isActive = true
+            row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
+        }
+
+        let container = FlippedView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: visibleHeight))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = container
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            container.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            container.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            container.widthAnchor.constraint(equalToConstant: rowWidth),
+        ])
+
+        return scroll
     }
 
     private func updateStatusIcon() {
