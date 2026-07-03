@@ -256,12 +256,16 @@ final class ConfigStore {
 
     private func normalizePlanConsistency(_ profile: inout LaunchProfile) {
         guard profile.provider == .claude else { return }
-        // Billing type is the only trusted plan source for Claude, so force the cached
-        // plan to match it - this also repairs stale "Free"/"Max" values without a rescan.
+        let currentIsPaid = ["pro", "max", "team", "plus"].contains((profile.accountPlan ?? "").lowercased())
         switch profile.billingType {
-        case "none": setPlan("Free", on: &profile)
-        case "stripe_subscription": setPlan("Pro", on: &profile)
-        default: break
+        case "none":
+            // A "none" reading is only trusted when we don't already know it's paid;
+            // the local billing cache spuriously reports "none", which flipped Pro to Free.
+            if !currentIsPaid { setPlan("Free", on: &profile) }
+        case "stripe_subscription":
+            setPlan("Pro", on: &profile)
+        default:
+            break
         }
     }
 

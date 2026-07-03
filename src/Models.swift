@@ -171,7 +171,13 @@ struct LaunchProfile: Codable, Identifiable {
         accountEmail = identity.email
         signedIn = identity.isSignedIn
         if let planName = identity.planName {
-            accountPlan = planName
+            // Never let a noisy "Free" reading downgrade a plan we already know is paid;
+            // the local billing cache flips, so paid is sticky until removed/re-added.
+            let newIsFree = planName.caseInsensitiveCompare("Free") == .orderedSame
+            let currentIsPaid = ["pro", "max", "team", "plus"].contains((accountPlan ?? "").lowercased())
+            if !(newIsFree && currentIsPaid) {
+                accountPlan = planName
+            }
         }
         quotaSummary = identity.quotaSummary
         quotaSource = identity.quotaSource

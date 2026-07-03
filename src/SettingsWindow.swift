@@ -115,11 +115,19 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         rescan.bezelStyle = .rounded
         rescan.controlSize = .small
 
-        let leftPane = NSStackView(views: [listHeader, scroll, rescan])
+        removeButton.title = "Remove selected account"
+        removeButton.target = self
+        removeButton.action = #selector(removeAccount)
+        removeButton.bezelStyle = .rounded
+        removeButton.controlSize = .small
+        if #available(macOS 11.0, *) { removeButton.hasDestructiveAction = true }
+
+        let leftPane = NSStackView(views: [listHeader, scroll, rescan, removeButton])
         leftPane.translatesAutoresizingMaskIntoConstraints = false
         leftPane.orientation = .vertical
         leftPane.spacing = 8
         leftPane.alignment = .leading
+        leftPane.setCustomSpacing(16, after: rescan)
         scroll.widthAnchor.constraint(equalTo: leftPane.widthAnchor).isActive = true
 
         // Right: account section + General section.
@@ -208,11 +216,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         advancedHeader.orientation = .horizontal
         advancedHeader.spacing = 4
 
-        removeButton.target = self
-        removeButton.action = #selector(removeAccount)
-        removeButton.bezelStyle = .rounded
-        removeButton.controlSize = .small
-
         form.addArrangedSubview(header)
         form.setCustomSpacing(12, after: header)
         form.addArrangedSubview(menuBarAccount)
@@ -220,7 +223,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(autoStartHelp)
         form.addArrangedSubview(advancedHeader)
         form.addArrangedSubview(advancedStack)
-        form.addArrangedSubview(removeButton)
     }
 
     private func buildGeneralSection(into form: NSStackView) {
@@ -409,7 +411,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func removeAccount() {
         let row = table.selectedRow
-        guard let id = selectedID else { return }
+        guard let id = selectedID, row >= 0, row < config.profiles.count else { return }
+        let profile = config.profiles[row]
+
+        let alert = NSAlert()
+        alert.messageText = "Remove \(profile.accountEmail ?? profile.label) from LLMCodeBar?"
+        alert.informativeText = "This just takes the account off this list. Your Claude/Codex login and its data are not touched, and you can add it back with Rescan."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         commit { cfg in cfg.profiles.removeAll { $0.id == id } }
         table.reloadData()
         if !config.profiles.isEmpty {

@@ -70,7 +70,10 @@ enum AccountResolver {
         let email = preferredEmail(from: emails, provider: provider)
         let name = preferredName(from: names, excluding: email, provider: provider)
         let displayName = (email == nil || (name?.contains(" ") == true)) ? name : nil
-        let billingType = billingTypes.first
+        // Local leveldb logs often keep a stale "billing_type": null (from before an
+        // upgrade) alongside the current paid entry, and which one a scan happens to
+        // read flips between runs. Always prefer a paid signal over "none".
+        let billingType = billingTypes.first { $0 != "none" } ?? billingTypes.first
         let accountUUID = accountUUIDs.first
         let planName = planName(provider: provider, billingType: billingType, planSignals: planSignals)
 
