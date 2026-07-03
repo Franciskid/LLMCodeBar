@@ -81,6 +81,50 @@ enum MenuBarIcon {
     }
 }
 
+/// Renders the menu-bar status image as up to two stacked rows, each showing an
+/// account's app icon (Claude/Codex) followed by its 5h % so you can tell them apart.
+enum MenuBarBadge {
+    struct Row {
+        let icon: NSImage
+        let percent: Double
+    }
+
+    static func image(rows: [Row]) -> NSImage {
+        let visible = Array(rows.prefix(2))
+        let twoUp = visible.count >= 2
+
+        let font = NSFont.monospacedDigitSystemFont(ofSize: twoUp ? 9.5 : 11.5, weight: .semibold)
+        let iconSize: CGFloat = twoUp ? 11 : 15
+        let rowHeight: CGFloat = twoUp ? 11 : 18
+        let gap: CGFloat = 2.5
+        let totalHeight = rowHeight * CGFloat(max(1, visible.count))
+
+        let texts: [NSAttributedString] = visible.map { row in
+            NSAttributedString(
+                string: "\(Int(row.percent.rounded()))%",
+                attributes: [.font: font, .foregroundColor: MenuBarIcon.statusColor(for: row.percent)])
+        }
+        let contentWidth = texts.reduce(CGFloat(0)) { max($0, iconSize + gap + $1.size().width) }
+
+        let image = NSImage(size: NSSize(width: ceil(contentWidth), height: totalHeight))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        for (i, row) in visible.enumerated() {
+            // Row 0 sits at the top (menu-bar images use a bottom-left origin).
+            let rowMidY = totalHeight - (CGFloat(i) + 0.5) * rowHeight
+            let iconRect = NSRect(x: 0, y: rowMidY - iconSize / 2, width: iconSize, height: iconSize)
+            row.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+
+            let textSize = texts[i].size()
+            texts[i].draw(at: NSPoint(x: iconSize + gap, y: rowMidY - textSize.height / 2))
+        }
+
+        image.isTemplate = false
+        return image
+    }
+}
+
 final class UsageBarView: NSView {
     var usedPercent: Double? {
         didSet { needsDisplay = true }

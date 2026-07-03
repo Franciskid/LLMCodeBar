@@ -165,11 +165,18 @@ struct LaunchProfile: Codable, Identifiable {
     }
 
     mutating func apply(identity: AccountIdentity) {
-        let account = identity.displayName ?? identity.email ?? "Signed-in account"
-        label = "\(provider.rawValue) - \(account)"
-        accountName = identity.displayName
-        accountEmail = identity.email
         signedIn = identity.isSignedIn
+        // Email and name are sticky: the local store occasionally surfaces a stray
+        // address/name, and the account's identity shouldn't flip between scans. Keep
+        // the first real values until the account is removed and re-added.
+        if (accountEmail?.isEmpty ?? true), let newEmail = identity.email {
+            accountEmail = newEmail
+        }
+        if (accountName?.isEmpty ?? true), let newName = identity.displayName {
+            accountName = newName
+        }
+        let account = accountName ?? accountEmail ?? "Signed-in account"
+        label = "\(provider.rawValue) - \(account)"
         if let planName = identity.planName {
             // Never let a noisy "Free" reading downgrade a plan we already know is paid;
             // the local billing cache flips, so paid is sticky until removed/re-added.
@@ -215,8 +222,22 @@ struct AppConfig: Codable {
     var refreshIntervalSeconds: Int?
     var showPercentInMenuBar: Bool?
     var showSparklines: Bool?
-    /// Which account drives the menu-bar icon/percentage. Nil = first account.
+    /// Legacy single-account menu-bar selection. Superseded by `menuBarProfileIDs`,
+    /// kept for backward compatibility and as the fallback icon's target.
     var menuBarProfileID: String?
+    /// Up to two accounts whose 5h % is shown in the menu bar, each with its app icon.
+    var menuBarProfileIDs: [String]?
+
+    /// The effective menu-bar accounts (max 2), falling back to the legacy single ID.
+    var menuBarProfileIDList: [String] {
+        if let ids = menuBarProfileIDs, !ids.isEmpty {
+            return Array(ids.prefix(2))
+        }
+        if let single = menuBarProfileID {
+            return [single]
+        }
+        return []
+    }
 
     /// Whether the app may read the encrypted cookie store via the keychain.
     /// Defaults to `true` for configs written before this option existed.

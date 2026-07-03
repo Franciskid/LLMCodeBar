@@ -179,6 +179,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         menuBarAccount.target = self
         menuBarAccount.action = #selector(menuBarAccountChanged)
+        menuBarAccount.toolTip = "Show this account's 5h session % in the menu bar, with its app icon. You can show up to 2 accounts, stacked one above the other."
 
         autoStartSession.target = self
         autoStartSession.action = #selector(autoStartChanged)
@@ -313,7 +314,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         appPathField.stringValue = profile.appPath
         dataDirField.stringValue = profile.dataDir
 
-        menuBarAccount.state = (config.menuBarProfileID == profile.id && config.showsPercentInMenuBar) ? .on : .off
+        menuBarAccount.state = (config.menuBarProfileIDList.contains(profile.id) && config.showsPercentInMenuBar) ? .on : .off
 
         let signedIn = profile.signedIn == true
         autoStartSession.isEnabled = signedIn
@@ -350,13 +351,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         guard let id = selectedID else { return }
         let on = menuBarAccount.state == .on
         commit { cfg in
+            var ids = cfg.menuBarProfileIDList
             if on {
-                cfg.menuBarProfileID = id
-                cfg.showPercentInMenuBar = true
-            } else if cfg.menuBarProfileID == id {
-                cfg.menuBarProfileID = nil
-                cfg.showPercentInMenuBar = false
+                if !ids.contains(id) { ids.append(id) }
+                // Cap at 2: keep the newly checked account and drop the oldest.
+                if ids.count > 2 { ids.removeFirst(ids.count - 2) }
+            } else {
+                ids.removeAll { $0 == id }
             }
+            cfg.menuBarProfileIDs = ids
+            cfg.menuBarProfileID = ids.first
+            cfg.showPercentInMenuBar = !ids.isEmpty
         }
     }
 

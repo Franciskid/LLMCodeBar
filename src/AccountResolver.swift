@@ -253,14 +253,32 @@ enum AccountResolver {
             "example.com",
             "example.org",
             "getsentry.com",
+            "sentry.io",
             "openssl.org",
-            "sourceware.org"
+            "sourceware.org",
+            "google.com",
+            "gstatic.com",
+            "googleapis.com",
+            "cloudflare.com",
+            "stripe.com",
+            "intercom.io",
+            "sentry.wixpress.com"
+        ]
+        // Service/no-reply mailboxes get cached in the local store alongside the real
+        // account address; reject them so a stray one never becomes the sticky email.
+        let blockedLocalParts: Set<String> = [
+            "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+            "support", "help", "hello", "contact", "info", "notifications",
+            "notification", "team", "security", "privacy", "legal", "billing",
+            "sales", "admin", "feedback", "abuse", "postmaster", "mailer-daemon"
         ]
         let filtered = emails.filter { email in
             let parts = email.split(separator: "@")
             guard parts.count == 2,
                   parts[0].count >= 2,
                   let domain = parts.last else { return false }
+            let localPart = String(parts[0]).lowercased()
+            if blockedLocalParts.contains(localPart) { return false }
             let domainText = String(domain)
             let domainParts = domainText.split(separator: ".")
             guard domainParts.count >= 2,

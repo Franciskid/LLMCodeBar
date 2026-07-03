@@ -16,7 +16,9 @@ Plenty of menu bar apps show your Claude or Codex usage. This one is built for t
 
 - Session (5h) and Weekly bars for every account, with reset times.
 - A 7 day trend line per limit that goes green to red as you get close.
-- Pick one account's 5h % to show in the menu bar.
+- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which.
+
+  <img src="assets/menubar.png" alt="Two accounts' 5h usage in the menu bar" width="72">
 - Refresh from every 30 seconds to every 30 minutes.
 - Launch at login.
 

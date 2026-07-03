@@ -127,22 +127,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
-        let percent = ProfileFormatting.menuBarPercent(in: config.profiles, selectedID: config.menuBarProfileID)
-        button.image = MenuBarIcon.make(usagePercent: percent, isRefreshing: refreshInFlight)
 
-        if config.showsPercentInMenuBar, let percent {
-            button.imagePosition = .imageLeading
-            button.attributedTitle = NSAttributedString(
-                string: " \(Int(percent.rounded()))%",
-                attributes: [
-                    .foregroundColor: MenuBarIcon.statusColor(for: percent),
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                ])
-        } else {
-            button.imagePosition = .imageOnly
-            button.attributedTitle = NSAttributedString(string: "")
-            button.title = ""
+        // When showing percentages, draw up to two stacked rows (app icon + 5h %) so
+        // it's clear which account each number belongs to. Otherwise show the glyph.
+        let badgeRows: [MenuBarBadge.Row] = config.menuBarProfileIDList.compactMap { id in
+            guard let profile = config.profiles.first(where: { $0.id == id }),
+                  let percent = ProfileFormatting.primaryUsagePercent(for: profile) else { return nil }
+            let icon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
+            return MenuBarBadge.Row(icon: icon, percent: percent)
         }
+
+        if config.showsPercentInMenuBar, !badgeRows.isEmpty {
+            button.image = MenuBarBadge.image(rows: badgeRows)
+        } else {
+            let percent = ProfileFormatting.menuBarPercent(in: config.profiles, selectedID: config.menuBarProfileID)
+            button.image = MenuBarIcon.make(usagePercent: percent, isRefreshing: refreshInFlight)
+        }
+        button.imagePosition = .imageOnly
+        button.attributedTitle = NSAttributedString(string: "")
+        button.title = ""
         button.toolTip = "LLMCodeBar"
     }
 
