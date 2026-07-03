@@ -114,14 +114,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings() {
-        settingsWindow = SettingsWindowController(config: config) { [weak self] newConfig in
+        // Immediate apply: each settings edit mutates the live config, saves, and
+        // updates the menu. No network refresh per keystroke, and nothing to "reset".
+        settingsWindow = SettingsWindowController(config: config) { [weak self] mutate in
             guard let self else { return }
-            self.config = newConfig
-            ConfigStore.shared.save(newConfig)
+            mutate(&self.config)
+            ConfigStore.shared.save(self.config)
             self.scheduleRefreshTimer()
             self.updateStatusIcon()
             self.rebuildMenu()
-            self.refreshAllAsync()
         }
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -142,13 +143,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let refreshed = UsageRefresher.refresh(loaded)
             ConfigStore.shared.save(refreshed)
             UsageHistoryStore.shared.record(profiles: refreshed.profiles)
-            SessionKickstarter.runIfNeeded(profiles: refreshed.profiles, allowKeychain: refreshed.allowsCookieKeychain)
+            // Auto-start idle 5h sessions (e.g. right after login); if one is started,
+            // refresh again shortly so the menu reflects the now-running session.
+            SessionKickstarter.runIfNeeded(profiles: refreshed.profiles, allowKeychain: refreshed.allowsCookieKeychain) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self?.refreshAllAsync() }
+            }
 
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.config = refreshed
                 self.refreshInFlight = false
-                self.settingsWindow?.refreshFromDiskPreservingSelection()
+                // Note: we deliberately don't reload the open Settings window here.
+                // It applies edits immediately, so reloading it would just fight the
+                // user and make controls appear to reset.
                 self.updateStatusIcon()
                 self.rebuildMenu()
             }

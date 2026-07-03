@@ -29,16 +29,20 @@ enum SessionKickstarter {
 
     // MARK: Auto (timer-driven)
 
-    static func runIfNeeded(profiles: [LaunchProfile], allowKeychain: Bool) {
+    static func runIfNeeded(profiles: [LaunchProfile], allowKeychain: Bool, onSessionStarted: (() -> Void)? = nil) {
         let candidates = profiles.filter { $0.autoStartsSession }
         guard !candidates.isEmpty else { return }
 
         queue.async {
+            var started = false
             for profile in candidates {
                 guard shouldKick(profile) else { continue }
                 lastKick[profile.id] = Date()
-                _ = startSession(for: profile, allowKeychain: allowKeychain)
+                if startSession(for: profile, allowKeychain: allowKeychain).hasPrefix("Started") {
+                    started = true
+                }
             }
+            if started { onSessionStarted?() }
         }
     }
 
