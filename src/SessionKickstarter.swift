@@ -24,8 +24,9 @@ enum SessionKickstarter {
         nil,
     ]
 
-    /// Codex models to try, cheapest first.
-    private static let codexModels = ["gpt-5-codex", "gpt-5"]
+    /// Fallback ChatGPT models if the account's configured model can't be read. ChatGPT
+    /// accounts only accept their provisioned model, so `config.toml` is the real source.
+    private static let codexModelFallbacks = ["gpt-5.1-codex", "gpt-5-codex", "gpt-5"]
 
     // MARK: Auto (timer-driven)
 
@@ -52,17 +53,20 @@ enum SessionKickstarter {
     /// a session that just started sits at ~0% but is running.
     static func isSessionIdle(_ profile: LaunchProfile) -> Bool {
         guard let usage = profile.usage, profile.usageStale != true else { return false }
-        guard let window = usage.windows.first(where: { $0.title == "5h" }) else {
-            return true // no 5h window → session hasn't started
-        }
         switch profile.provider {
         case .claude:
+            guard let window = usage.windows.first(where: { $0.title == "5h" }) else {
+                return true // no 5h window → session hasn't started
+            }
             // Claude only reports a reset time once the window is running, so that's
             // the true "clock started" signal (usage may still be ~0% just after start).
             if let reset = window.resetsAt { return reset <= Date() }
             return window.usedPercent <= 0.5
         case .codex:
-            // Codex's rate window always carries a reset time, so fall back to usage.
+            // ChatGPT reports whatever rate window applies (a Plus account often shows
+            // only the weekly limit), so use the 5h window if present, else the primary.
+            let window = usage.windows.first { $0.title == "5h" } ?? usage.windows.first
+            guard let window else { return true }
             if let reset = window.resetsAt, reset <= Date() { return true }
             return window.usedPercent <= 0.5
         }
@@ -157,9 +161,15 @@ enum SessionKickstarter {
     private static func startCodexSession(_ profile: LaunchProfile) -> String {
         do {
             var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
+            // Try the account's own configured model first; the ChatGPT backend rejects
+            // any model it wasn't provisioned for.
+            var models = codexModelFallbacks
+            if let configured = CodexAuthStore.configuredModel(dataDir: profile.dataDir) {
+                models = [configured] + models.filter { $0 != configured }
+            }
             var lastStatus = 0
             var lastError = ""
-            for model in codexModels {
+            for model in models {
                 var response = try sendCodexMessage(model: model, credentials: credentials)
                 if response.statusCode == 401 {
                     credentials = try CodexAuthStore.refreshCredentials(credentials)

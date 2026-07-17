@@ -119,8 +119,8 @@ enum UsageRefresher {
 
             let rateLimit = json["rate_limit"] as? [String: Any]
             let windows = [
-                codexProofWindow(rateLimit?["primary_window"], title: "5h"),
-                codexProofWindow(rateLimit?["secondary_window"], title: "Week"),
+                codexProofWindow(rateLimit?["primary_window"]),
+                codexProofWindow(rateLimit?["secondary_window"]),
             ].compactMap { $0 }
             let credits = json["credits"] as? [String: Any]
             let balance = flexibleDouble(credits?["balance"])
@@ -346,8 +346,10 @@ enum UsageRefresher {
         let plan = CodexAuthStore.displayPlan((json["plan_type"] as? String) ?? account?.plan)
         let rateLimit = json["rate_limit"] as? [String: Any]
         var windows: [UsageWindow] = []
-        appendCodexWindow(rateLimit?["primary_window"], title: "5h", windows: &windows)
-        appendCodexWindow(rateLimit?["secondary_window"], title: "Week", windows: &windows)
+        // The window slots aren't fixed to 5h/weekly (a Plus account often reports only
+        // a single weekly window in primary_window), so label each by its real duration.
+        appendCodexWindow(rateLimit?["primary_window"], windows: &windows)
+        appendCodexWindow(rateLimit?["secondary_window"], windows: &windows)
 
         let credits = json["credits"] as? [String: Any]
         let balance = flexibleDouble(credits?["balance"])
@@ -376,20 +378,34 @@ enum UsageRefresher {
             headers: headers)
     }
 
-    private static func appendCodexWindow(_ raw: Any?, title: String, windows: inout [UsageWindow]) {
+    private static func appendCodexWindow(_ raw: Any?, windows: inout [UsageWindow]) {
         guard let block = raw as? [String: Any],
               let used = flexibleDouble(block["used_percent"]) else { return }
+        let title = codexWindowTitle(seconds: flexibleDouble(block["limit_window_seconds"]))
+        // Avoid two windows colliding on the same label (e.g. two weekly slots).
+        let unique = windows.contains(where: { $0.title == title }) ? "\(title) 2" : title
         let resetSeconds = flexibleDouble(block["reset_at"])
         windows.append(UsageWindow(
-            title: title,
+            title: unique,
             usedPercent: max(0, min(100, used)),
             remainingPercent: max(0, min(100, 100 - used)),
             resetsAt: resetSeconds.map { Date(timeIntervalSince1970: $0) }))
     }
 
-    private static func codexProofWindow(_ raw: Any?, title: String) -> QuotaWindowProof? {
+    /// Labels a ChatGPT rate window by how long it spans: ~5h session, ~daily, or weekly.
+    private static func codexWindowTitle(seconds: Double?) -> String {
+        guard let seconds, seconds > 0 else { return "5h" }
+        switch seconds {
+        case ..<64_800: return "5h"      // up to ~18h: the short "session" window (5h = 18000s)
+        case ..<172_800: return "Daily"  // ~1 day (86400s)
+        default: return "Week"           // multi-day (604800s = 7 days)
+        }
+    }
+
+    private static func codexProofWindow(_ raw: Any?) -> QuotaWindowProof? {
         guard let block = raw as? [String: Any],
               let providerUsed = flexibleDouble(block["used_percent"]) else { return nil }
+        let title = codexWindowTitle(seconds: flexibleDouble(block["limit_window_seconds"]))
         let parsedUsed = clampPercent(providerUsed)
         let parsedRemaining = clampPercent(100 - providerUsed)
         let resetSeconds = flexibleDouble(block["reset_at"])

@@ -143,6 +143,42 @@ enum CodexAuthStore {
         }
     }
 
+    /// The model the user's Codex CLI is configured to use (from `config.toml`). ChatGPT
+    /// accounts only accept the model provisioned for them, so the session-start flow
+    /// tries this before any hardcoded fallback.
+    static func configuredModel(dataDir: String? = nil) -> String? {
+        for url in configFileCandidates(dataDir: dataDir) where FileManager.default.fileExists(atPath: url.path) {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            // TOML: `model = "gpt-5.6-luna"`, ignoring commented lines.
+            if let model = firstCapture(pattern: #"(?m)^\s*model\s*=\s*"([^"]+)""#, in: text) {
+                return model
+            }
+        }
+        return nil
+    }
+
+    private static func configFileCandidates(dataDir: String?) -> [URL] {
+        var urls: [URL] = []
+        if let dataDir {
+            let root = URL(fileURLWithPath: Launcher.expanding(dataDir), isDirectory: true)
+            urls.append(root.appendingPathComponent("CodexHome/config.toml"))
+            urls.append(root.appendingPathComponent("config.toml"))
+        }
+        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"], !codexHome.isEmpty {
+            urls.append(URL(fileURLWithPath: codexHome, isDirectory: true).appendingPathComponent("config.toml"))
+        }
+        urls.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/config.toml"))
+        return urls
+    }
+
+    private static func firstCapture(pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[captureRange])
+    }
+
     private static func authFileCandidates(dataDir: String?) -> [URL] {
         var urls: [URL] = []
         if let dataDir {
