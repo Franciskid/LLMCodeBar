@@ -82,7 +82,7 @@ enum MenuBarIcon {
 }
 
 /// Renders the menu-bar status image as up to two stacked rows, each showing an
-/// account's app icon (Claude/Codex) followed by its 5h % so you can tell them apart.
+/// account's app icon (Claude/ChatGPT) followed by its 5h % so you can tell them apart.
 enum MenuBarBadge {
     struct Row {
         let icon: NSImage

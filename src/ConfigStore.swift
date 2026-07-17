@@ -22,7 +22,8 @@ final class ConfigStore {
         // re-infer the profile list and apply one-time migrations.
         var config = existing
         config.autoApproveCookieAccess = existing.autoApproveCookieAccess ?? true
-        config.profiles = inferProfiles(existing: existing.profiles)
+        migrateCodexRename(&config.profiles)
+        config.profiles = inferProfiles(existing: config.profiles)
         if config.configVersion == nil {
             // One-time migration for configs written before these options existed:
             // opt the user into launch-at-login (explicitly requested) and cookie access.
@@ -63,7 +64,7 @@ final class ConfigStore {
         let support = "\(home)/Library/Application Support"
 
         let claudeApp = "/Applications/Claude.app"
-        let codexApp = "/Applications/Codex.app"
+        let codexApp = defaultAppPath(for: .codex)
 
         var candidates: [(provider: Provider, appPath: String, dataDir: String, userAdded: Bool)] = []
 
@@ -193,10 +194,31 @@ final class ConfigStore {
         return candidates
     }
 
+    /// Codex's desktop app was renamed to ChatGPT. Repoint stored profiles at the new
+    /// bundle (so the right icon shows) and refresh auto-generated "Codex - " labels.
+    /// Idempotent: once migrated, neither branch matches again.
+    private func migrateCodexRename(_ profiles: inout [LaunchProfile]) {
+        for i in profiles.indices where profiles[i].provider == .codex {
+            if profiles[i].appPath == "/Applications/Codex.app" {
+                profiles[i].appPath = defaultAppPath(for: .codex)
+            }
+            if profiles[i].label.hasPrefix("Codex - ") {
+                profiles[i].label = "ChatGPT - " + profiles[i].label.dropFirst("Codex - ".count)
+            }
+        }
+    }
+
     private func defaultAppPath(for provider: Provider) -> String {
         switch provider {
         case .claude: return "/Applications/Claude.app"
-        case .codex: return "/Applications/Codex.app"
+        case .codex:
+            // Codex's desktop app is now the ChatGPT app; fall back to the old bundle
+            // only if someone still has it installed.
+            let chatGPT = "/Applications/ChatGPT.app"
+            let legacyCodex = "/Applications/Codex.app"
+            if FileManager.default.fileExists(atPath: chatGPT) { return chatGPT }
+            if FileManager.default.fileExists(atPath: legacyCodex) { return legacyCodex }
+            return chatGPT
         }
     }
 

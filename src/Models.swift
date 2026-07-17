@@ -3,6 +3,21 @@ import Foundation
 enum Provider: String, Codable, CaseIterable {
     case claude = "Claude"
     case codex = "Codex"
+
+    /// User-facing name. OpenAI's Codex desktop app is now the ChatGPT app, so we show
+    /// "ChatGPT" while keeping the stored rawValue "Codex" for config, keychain, and
+    /// dedup-key stability across the rename.
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "ChatGPT"
+        }
+    }
+
+    /// Resolve a provider from either its display name ("ChatGPT") or stored rawValue.
+    static func named(_ name: String) -> Provider? {
+        allCases.first { $0.displayName == name || $0.rawValue == name }
+    }
 }
 
 struct UsageWindow: Codable {
@@ -119,7 +134,7 @@ struct LaunchProfile: Codable, Identifiable {
         let account = identity.displayName ?? identity.email ?? "Signed-in account"
         return LaunchProfile(
             id: UUID().uuidString,
-            label: "\(provider.rawValue) - \(account)",
+            label: "\(provider.displayName) - \(account)",
             provider: provider,
             appPath: appPath,
             dataDir: dataDir,
@@ -143,7 +158,7 @@ struct LaunchProfile: Codable, Identifiable {
     static func pending(provider: Provider, appPath: String, dataDir: String) -> LaunchProfile {
         LaunchProfile(
             id: UUID().uuidString,
-            label: "\(provider.rawValue) - Connect account",
+            label: "\(provider.displayName) - Connect account",
             provider: provider,
             appPath: appPath,
             dataDir: dataDir,
@@ -176,7 +191,7 @@ struct LaunchProfile: Codable, Identifiable {
             accountName = newName
         }
         let account = accountName ?? accountEmail ?? "Signed-in account"
-        label = "\(provider.rawValue) - \(account)"
+        label = "\(provider.displayName) - \(account)"
         if let planName = identity.planName {
             // Never let a noisy "Free" reading downgrade a plan we already know is paid;
             // the local billing cache flips, so paid is sticky until removed/re-added.

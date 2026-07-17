@@ -111,7 +111,7 @@ enum UsageRefresher {
                     plan: account?.plan ?? profile.accountPlan,
                     endpoint: endpoint,
                     httpStatus: response.statusCode,
-                    status: "Codex usage HTTP \(response.statusCode)",
+                    status: "ChatGPT usage HTTP \(response.statusCode)",
                     parserMatchesProvider: false,
                     windows: [],
                     creditsRemaining: nil)
@@ -132,7 +132,7 @@ enum UsageRefresher {
                 plan: plan,
                 endpoint: endpoint,
                 httpStatus: response.statusCode,
-                status: windows.isEmpty && balance == nil ? "Codex usage unavailable" : nil,
+                status: windows.isEmpty && balance == nil ? "ChatGPT usage unavailable" : nil,
                 parserMatchesProvider: !windows.isEmpty && windows.allSatisfy(\.matches),
                 windows: windows,
                 creditsRemaining: balance)
@@ -339,7 +339,7 @@ enum UsageRefresher {
         }
         guard (200...299).contains(response.statusCode),
               let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
-            throw NSError(domain: "LLMUsageBar.Codex", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Codex usage HTTP \(response.statusCode)"])
+            throw NSError(domain: "LLMUsageBar.Codex", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "ChatGPT usage HTTP \(response.statusCode)"])
         }
 
         let account = CodexAuthStore.accountInfo(dataDir: profile.dataDir)
@@ -354,7 +354,7 @@ enum UsageRefresher {
 
         return UsageInfo(
             source: "codex-oauth",
-            status: windows.isEmpty && balance == nil ? "Codex usage unavailable" : nil,
+            status: windows.isEmpty && balance == nil ? "ChatGPT usage unavailable" : nil,
             windows: windows,
             creditsRemaining: balance,
             accountEmail: account?.email,

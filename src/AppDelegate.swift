@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
 
         if config.profiles.isEmpty {
-            let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude and Codex accounts..." : "No Claude/Codex accounts found", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude and ChatGPT accounts..." : "No Claude/ChatGPT accounts found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {

@@ -166,16 +166,16 @@ enum SessionKickstarter {
                     response = try sendCodexMessage(model: model, credentials: credentials)
                 }
                 if (200...299).contains(response.statusCode) {
-                    return "Started a Codex 5h session - sent “hi” on \(model)."
+                    return "Started a ChatGPT 5h session - sent “hi” on \(model)."
                 }
                 lastStatus = response.statusCode
                 lastError = conciseError(response.data)
                 // Keep trying other models only on a model-availability error.
                 if !lastError.lowercased().contains("model") { break }
             }
-            return "Couldn't start Codex session (HTTP \(lastStatus)). \(lastError)"
+            return "Couldn't start ChatGPT session (HTTP \(lastStatus)). \(lastError)"
         } catch {
-            return "Failed to start Codex session: \(error.localizedDescription)"
+            return "Failed to start ChatGPT session: \(error.localizedDescription)"
         }
     }
 

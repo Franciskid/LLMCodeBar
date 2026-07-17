@@ -104,7 +104,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         listTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         let addAccountButton = NSButton(title: "+", target: self, action: #selector(addAccount))
         addAccountButton.bezelStyle = .rounded
-        addAccountButton.toolTip = "Add a Claude or Codex account"
+        addAccountButton.toolTip = "Add a Claude or ChatGPT account"
         addAccountButton.widthAnchor.constraint(equalToConstant: 32).isActive = true
         let listHeader = NSStackView(views: [listTitle, addAccountButton])
         listHeader.orientation = .horizontal
@@ -183,7 +183,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         autoStartSession.target = self
         autoStartSession.action = #selector(autoStartChanged)
-        autoStartSession.toolTip = "When the 5h window is idle or has reset, LLMCodeBar sends one tiny \"hi\" on the cheapest model to start it. For Claude it uses a throwaway chat that's deleted after. Only fires when the session isn't already running. Codex is experimental."
+        autoStartSession.toolTip = "When the 5h window is idle or has reset, LLMCodeBar sends one tiny \"hi\" on the cheapest model to start it. For Claude it uses a throwaway chat that's deleted after. Only fires when the session isn't already running. ChatGPT is experimental."
         startSessionNow.target = self
         startSessionNow.action = #selector(startSessionNowTapped)
         startSessionNow.bezelStyle = .rounded
@@ -191,12 +191,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         autoStartRow.orientation = .horizontal
         autoStartRow.spacing = 10
 
-        let autoStartHelp = helpLabel("Starts the 5h window when it's idle by sending a tiny \"hi\" on the cheapest model. Only acts when the session isn't already running. Codex is experimental.")
+        let autoStartHelp = helpLabel("Starts the 5h window when it's idle by sending a tiny \"hi\" on the cheapest model. Only acts when the session isn't already running. ChatGPT is experimental.")
 
         // Advanced (label / paths), collapsed.
         advancedStack.orientation = .vertical
         advancedStack.spacing = 8
-        providerPopup.addItems(withTitles: Provider.allCases.map(\.rawValue))
+        providerPopup.addItems(withTitles: Provider.allCases.map(\.displayName))
         for field in [labelField, appPathField, dataDirField] { field.delegate = self }
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
@@ -232,7 +232,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         title.toolTip = "Applies to LLMCodeBar, not to any single account."
 
         launchAtLogin.state = (config.launchAtLogin || AutostartManager.isEnabled) ? .on : .off
-        launchAtLogin.toolTip = "Start LLMCodeBar itself when you log in to your Mac. (Not the Claude or Codex apps.)"
+        launchAtLogin.toolTip = "Start LLMCodeBar itself when you log in to your Mac. (Not the Claude or ChatGPT apps.)"
         launchAtLogin.target = self
         launchAtLogin.action = #selector(launchAtLoginChanged)
 
@@ -253,7 +253,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         showSparklines.action = #selector(sparklinesChanged)
 
         autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off
-        autoApproveCookies.toolTip = "Reads the encrypted cookie store for live usage. macOS asks to approve keychain access once (click \"Always Allow\"). Uncheck to never prompt; usage then updates only while Claude/Codex is open."
+        autoApproveCookies.toolTip = "Reads the encrypted cookie store for live usage. macOS asks to approve keychain access once (click \"Always Allow\"). Uncheck to never prompt; usage then updates only while Claude/ChatGPT is open."
         autoApproveCookies.target = self
         autoApproveCookies.action = #selector(cookiesChanged)
         let cookiesHelp = helpLabel("Approve the keychain once (\"Always Allow\") instead of every launch. Uncheck to never prompt.")
@@ -310,7 +310,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         accountControls.forEach { $0.isEnabled = true }
 
         labelField.stringValue = profile.label
-        providerPopup.selectItem(withTitle: profile.provider.rawValue)
+        providerPopup.selectItem(withTitle: profile.provider.displayName)
         appPathField.stringValue = profile.appPath
         dataDirField.stringValue = profile.dataDir
 
@@ -331,7 +331,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             accountSubtitle.stringValue = "Sign in when the window opens"
         } else {
             accountTitle.stringValue = profile.accountEmail ?? profile.accountName ?? "\(profile.provider.rawValue) account"
-            accountSubtitle.stringValue = [profile.provider.rawValue, profile.usage?.accountPlan ?? profile.accountPlan]
+            accountSubtitle.stringValue = [profile.provider.displayName, profile.usage?.accountPlan ?? profile.accountPlan]
                 .compactMap { $0 }.joined(separator: "  ·  ")
         }
         statusLabel.stringValue = ""
@@ -377,7 +377,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func providerChanged() {
         guard let id = selectedID else { return }
-        let provider = Provider(rawValue: providerPopup.titleOfSelectedItem ?? "Claude") ?? .claude
+        let provider = Provider.named(providerPopup.titleOfSelectedItem ?? "Claude") ?? .claude
         commit { cfg in
             if let i = cfg.profiles.firstIndex(where: { $0.id == id }) { cfg.profiles[i].provider = provider }
         }
@@ -421,7 +421,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         let alert = NSAlert()
         alert.messageText = "Remove \(profile.accountEmail ?? profile.label) from LLMCodeBar?"
-        alert.informativeText = "This just takes the account off this list. Your Claude/Codex login and its data are not touched, and you can add it back with Rescan."
+        alert.informativeText = "This just takes the account off this list. Your Claude/ChatGPT login and its data are not touched, and you can add it back with Rescan."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
@@ -443,10 +443,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         alert.addButton(withTitle: "Open Login Window")
         alert.addButton(withTitle: "Cancel")
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
-        picker.addItems(withTitles: Provider.allCases.map(\.rawValue))
+        picker.addItems(withTitles: Provider.allCases.map(\.displayName))
         alert.accessoryView = picker
         guard alert.runModal() == .alertFirstButtonReturn,
-              let provider = Provider(rawValue: picker.titleOfSelectedItem ?? "") else { return }
+              let provider = Provider.named(picker.titleOfSelectedItem ?? "") else { return }
 
         let profile = ConfigStore.shared.createPendingProfile(provider: provider)
         commit { $0.profiles.append(profile) }

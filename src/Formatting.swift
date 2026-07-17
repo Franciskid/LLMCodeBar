@@ -15,7 +15,7 @@ enum ProfileFormatting {
     }
 
     static func subtitle(for profile: LaunchProfile) -> String {
-        var parts = [profile.provider.rawValue]
+        var parts = [profile.provider.displayName]
         if let plan = profile.usage?.accountPlan ?? profile.accountPlan {
             parts.append(plan)
         } else if profile.signedIn == true {
