@@ -5,6 +5,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// Applies an edit to the app's live config (and this window's copy). Immediate
     /// apply means there's no unsaved state to lose, so nothing "resets".
     private let onChange: (@escaping (inout AppConfig) -> Void) -> Void
+    /// Runs a check against GitHub, reporting progress back into `statusLabel`.
+    private let onCheckForUpdates: (@escaping (String) -> Void) -> Void
 
     private let table = NSTableView()
 
@@ -27,6 +29,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let refreshIntervalPopup = NSPopUpButton()
     private let showSparklines = NSButton(checkboxWithTitle: "Show 7-day trend sparklines", target: nil, action: nil)
     private let autoApproveCookies = NSButton(checkboxWithTitle: "Auto-approve cookie access", target: nil, action: nil)
+    private let autoUpdate = NSButton(checkboxWithTitle: "Install updates automatically", target: nil, action: nil)
+    private let routeClaudeLinks = NSButton(checkboxWithTitle: "Send Claude sign-in links to the right window", target: nil, action: nil)
+    private let checkForUpdatesButton = NSButton(title: "Check Now", target: nil, action: nil)
 
     private let statusLabel = NSTextField(labelWithString: "")
 
@@ -34,11 +39,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         ("30 sec", 30), ("1 min", 60), ("2 min", 120), ("5 min", 300), ("10 min", 600), ("15 min", 900), ("30 min", 1800),
     ]
 
-    init(config: AppConfig, onChange: @escaping (@escaping (inout AppConfig) -> Void) -> Void) {
+    init(config: AppConfig,
+         onChange: @escaping (@escaping (inout AppConfig) -> Void) -> Void,
+         onCheckForUpdates: @escaping (@escaping (String) -> Void) -> Void) {
         self.config = config
         self.onChange = onChange
+        self.onCheckForUpdates = onCheckForUpdates
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 436),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false)
@@ -258,6 +266,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         autoApproveCookies.action = #selector(cookiesChanged)
         let cookiesHelp = helpLabel("Approve the keychain once (\"Always Allow\") instead of every launch. Uncheck to never prompt.")
 
+        autoUpdate.state = config.autoUpdates ? .on : .off
+        autoUpdate.toolTip = "Download new releases in the background and restart LLMCodeBar to apply them. Turn off to be offered the update in the menu instead."
+        autoUpdate.target = self
+        autoUpdate.action = #selector(autoUpdateChanged)
+
+        routeClaudeLinks.state = config.routesClaudeLinks ? .on : .off
+        routeClaudeLinks.toolTip = "Holds the claude:// link type so a sign-in returns to the window that started it. With two Claude windows open, macOS otherwise hands the sign-in to whichever it likes and it silently fails."
+        routeClaudeLinks.target = self
+        routeClaudeLinks.action = #selector(routeClaudeLinksChanged)
+        let routeHelp = helpLabel("Claude then signs in inside its own window instead of sending you to the browser.")
+
+        let versionLabel = NSTextField(labelWithString: "Version \(Updater.currentVersion)")
+        versionLabel.textColor = .secondaryLabelColor
+        checkForUpdatesButton.bezelStyle = .rounded
+        checkForUpdatesButton.controlSize = .small
+        checkForUpdatesButton.target = self
+        checkForUpdatesButton.action = #selector(checkForUpdatesNow)
+        let versionRow = NSStackView(views: [versionLabel, checkForUpdatesButton])
+        versionRow.orientation = .horizontal
+        versionRow.spacing = 8
+
         form.setCustomSpacing(12, after: form.arrangedSubviews.last!)
         form.addArrangedSubview(title)
         form.addArrangedSubview(launchAtLogin)
@@ -265,6 +294,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(showSparklines)
         form.addArrangedSubview(autoApproveCookies)
         form.addArrangedSubview(cookiesHelp)
+        form.addArrangedSubview(autoUpdate)
+        form.addArrangedSubview(routeClaudeLinks)
+        form.addArrangedSubview(routeHelp)
+        form.addArrangedSubview(versionRow)
     }
 
     private func divider() -> NSView {
@@ -501,6 +534,31 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func cookiesChanged() {
         let on = autoApproveCookies.state == .on
         commit { $0.autoApproveCookieAccess = on }
+    }
+
+    @objc private func autoUpdateChanged() {
+        let on = autoUpdate.state == .on
+        commit { $0.autoUpdate = on }
+    }
+
+    @objc private func routeClaudeLinksChanged() {
+        let on = routeClaudeLinks.state == .on
+        commit { $0.routeClaudeLinks = on }
+        // Hand the link type over (or back) straight away rather than at the next refresh.
+        if on {
+            ClaudeLinkRouter.claimScheme()
+        } else {
+            ClaudeLinkRouter.releaseScheme()
+        }
+    }
+
+    @objc private func checkForUpdatesNow() {
+        checkForUpdatesButton.isEnabled = false
+        onCheckForUpdates { [weak self] message in
+            guard let self else { return }
+            self.statusLabel.stringValue = message
+            self.checkForUpdatesButton.isEnabled = true
+        }
     }
 
     // MARK: Selection helpers

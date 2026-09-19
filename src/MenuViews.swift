@@ -353,7 +353,7 @@ final class ProfileMenuItemView: NSView {
         didSet { needsDisplay = true }
     }
 
-    init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool, showSparklines: Bool = false) {
+    init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool, showSparklines: Bool = false, warning: String? = nil) {
         self.profileID = profile.id
         self.actionTarget = target
         self.action = action
@@ -378,10 +378,13 @@ final class ProfileMenuItemView: NSView {
         if profile.usageStale == true {
             subtitleText += "  ·  stale · \(ProfileFormatting.updatedAgo(for: profile))"
         }
+        if let warning {
+            subtitleText = "⚠︎ \(warning)"
+        }
         let subtitle = NSTextField(labelWithString: subtitleText)
         subtitle.translatesAutoresizingMaskIntoConstraints = false
         subtitle.font = .systemFont(ofSize: 11.5, weight: .medium)
-        subtitle.textColor = profile.usageStale == true ? .systemOrange : .secondaryLabelColor
+        subtitle.textColor = (profile.usageStale == true || warning != nil) ? .systemOrange : .secondaryLabelColor
         subtitle.lineBreakMode = .byTruncatingTail
 
         let dot = StatusDotView()

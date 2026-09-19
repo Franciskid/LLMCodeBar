@@ -177,7 +177,14 @@ enum UsageRefresher {
         var profile = profile
         do {
             let cookieHeader = try claudeCookieHeader(for: profile, allowKeychain: allowKeychain)
+            // Ask who is actually signed in. A data directory keeps the previous
+            // account's caches after a sign-in to another one, so guessing from local
+            // files is exactly what mislabelled accounts and hid their history.
+            if let account = try? claudeAccount(cookieHeader: cookieHeader) {
+                profile.apply(serverAccount: account)
+            }
             let orgID = try claudeOrganizationID(cookieHeader: cookieHeader)
+            profile.organizationUUID = orgID
             let usage = try claudeUsage(cookieHeader: cookieHeader, orgID: orgID, profile: profile)
             profile.usage = usage
             profile.usageStale = false
@@ -265,6 +272,31 @@ enum UsageRefresher {
             throw NSError(domain: "LLMUsageBar.Claude", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Claude organization unavailable"])
         }
         return org
+    }
+
+    /// The account the cookies belong to, straight from claude.ai. `/api/account`
+    /// returns the account object at the top level; `/api/bootstrap` wraps the same
+    /// object in `account`, so either shape is accepted.
+    static func claudeAccount(cookieHeader: String) throws -> ClaudeServerAccount {
+        var lastStatus = 0
+        for path in ["account", "bootstrap"] {
+            let response = try SimpleHTTP.get(
+                URL(string: "https://claude.ai/api/\(path)")!,
+                headers: claudeHeaders(cookieHeader: cookieHeader))
+            lastStatus = response.statusCode
+            guard response.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+                continue
+            }
+            let account = (json["account"] as? [String: Any]) ?? json
+            guard let uuid = account["uuid"] as? String, !uuid.isEmpty else { continue }
+            let email = (account["email_address"] as? String)?.lowercased()
+            let name = [account["display_name"], account["full_name"]]
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
+            return ClaudeServerAccount(uuid: uuid, email: email, name: name)
+        }
+        throw NSError(domain: "LLMUsageBar.Claude", code: lastStatus, userInfo: [NSLocalizedDescriptionKey: "Claude account unavailable (HTTP \(lastStatus))"])
     }
 
     private static func claudeUsage(cookieHeader: String, orgID: String, profile: LaunchProfile) throws -> UsageInfo {

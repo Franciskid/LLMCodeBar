@@ -248,6 +248,13 @@ final class ConfigStore {
 
     private func accountKey(for profile: LaunchProfile) -> String? {
         guard profile.isPendingLogin != true else { return nil }
+        // Each Claude data directory is its own window with its own history, so two of
+        // them are never duplicates - even when both are signed in to the same account
+        // for a while (a re-login landing in the wrong window). Merging them used to
+        // make one window vanish and come back later rebuilt from stale caches.
+        if profile.provider == .claude {
+            return "\(profile.provider.rawValue)|dir|\(Launcher.expanding(profile.dataDir))"
+        }
         if let accountUUID = profile.accountUUID?.lowercased(), !accountUUID.isEmpty {
             return "\(profile.provider.rawValue)|uuid|\(accountUUID)"
         }

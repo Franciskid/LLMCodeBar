@@ -112,6 +112,10 @@ struct LaunchProfile: Codable, Identifiable {
     var quotaSource: String?
     var billingType: String?
     var accountUUID: String?
+    /// The Claude organization this account is signed in to. Recorded on refresh because
+    /// the desktop app files Code sessions under `<account uuid>/<org uuid>`, and finding
+    /// them shouldn't need a network round trip.
+    var organizationUUID: String?
     var isUserAdded: Bool?
     var isPendingLogin: Bool?
     var createdAt: Date?
@@ -127,6 +131,15 @@ struct LaunchProfile: Codable, Identifiable {
     var autoStartSession: Bool?
     /// Rate-limit guard so auto-start never fires more than once per window.
     var lastSessionKickAt: Date?
+    /// Set once Claude's own server has told us who this window is signed in as. From
+    /// then on the account uuid, email and name come from the server on every refresh,
+    /// and the local-cache scan (which keeps whoever *used* to own the data directory)
+    /// may no longer override them.
+    var identityVerified: Bool?
+    /// The account this window was signed in as before its most recent switch, and
+    /// when the switch was noticed - what lets the menu say "was X, now Y".
+    var previousAccountUUID: String?
+    var accountChangedAt: Date?
 
     var autoStartsSession: Bool { autoStartSession ?? false }
 
@@ -181,6 +194,14 @@ struct LaunchProfile: Codable, Identifiable {
 
     mutating func apply(identity: AccountIdentity) {
         signedIn = identity.isSignedIn
+        if identityVerified == true {
+            // The server already said who this is. The local scan reads caches that
+            // outlive a sign-in to another account, so it only gets to fill in plan
+            // details here, never the identity itself.
+            applyPlan(identity)
+            isPendingLogin = false
+            return
+        }
         // Email and name are sticky: the local store occasionally surfaces a stray
         // address/name, and the account's identity shouldn't flip between scans. Keep
         // the first real values until the account is removed and re-added.
@@ -192,6 +213,14 @@ struct LaunchProfile: Codable, Identifiable {
         }
         let account = accountName ?? accountEmail ?? "Signed-in account"
         label = "\(provider.displayName) - \(account)"
+        applyPlan(identity)
+        if let identityAccountUUID = identity.accountUUID {
+            accountUUID = identityAccountUUID
+        }
+        isPendingLogin = false
+    }
+
+    private mutating func applyPlan(_ identity: AccountIdentity) {
         if let planName = identity.planName {
             // Never let a noisy "Free" reading downgrade a plan we already know is paid;
             // the local billing cache flips, so paid is sticky until removed/re-added.
@@ -206,11 +235,32 @@ struct LaunchProfile: Codable, Identifiable {
         if let identityBillingType = identity.billingType {
             billingType = identityBillingType
         }
-        if let identityAccountUUID = identity.accountUUID {
-            accountUUID = identityAccountUUID
-        }
-        isPendingLogin = false
     }
+
+    /// Records who Claude's server says this window is signed in as. Unlike the local
+    /// scan this is authoritative, so it replaces whatever was there - including the
+    /// "sticky" email - and notes the switch when the account itself changed.
+    mutating func apply(serverAccount account: ClaudeServerAccount) {
+        let newUUID = account.uuid.lowercased()
+        if let oldUUID = accountUUID?.lowercased(), !oldUUID.isEmpty, oldUUID != newUUID {
+            previousAccountUUID = oldUUID
+            accountChangedAt = Date()
+        }
+        accountUUID = newUUID
+        if let email = account.email { accountEmail = email }
+        accountName = account.name
+        signedIn = true
+        isPendingLogin = false
+        identityVerified = true
+        label = "\(provider.rawValue) - \(accountEmail ?? accountName ?? "Signed-in account")"
+    }
+}
+
+/// The signed-in Claude account as reported by claude.ai itself.
+struct ClaudeServerAccount {
+    var uuid: String
+    var email: String?
+    var name: String?
 }
 
 struct AccountIdentity {
@@ -242,6 +292,14 @@ struct AppConfig: Codable {
     var menuBarProfileID: String?
     /// Up to two accounts whose 5h % is shown in the menu bar, each with its app icon.
     var menuBarProfileIDs: [String]?
+    /// Download and install new GitHub releases in the background, restarting the app
+    /// once the swap is done. Defaults to on for configs written before this existed.
+    var autoUpdate: Bool?
+    /// When the background updater last asked GitHub, so a restart doesn't re-check.
+    var lastUpdateCheckAt: Date?
+    /// Take over `claude://` links so a sign-in lands in the Claude window that started
+    /// it (see ClaudeLinkRouter). Defaults to on.
+    var routeClaudeLinks: Bool?
 
     /// The effective menu-bar accounts (max 2), falling back to the legacy single ID.
     var menuBarProfileIDList: [String] {
@@ -259,6 +317,10 @@ struct AppConfig: Codable {
     var allowsCookieKeychain: Bool { autoApproveCookieAccess ?? true }
 
     var showsSparklines: Bool { showSparklines ?? true }
+
+    var autoUpdates: Bool { autoUpdate ?? true }
+
+    var routesClaudeLinks: Bool { routeClaudeLinks ?? true }
 
     /// How often the background refresh timer fires. Clamped to [30s, 1h].
     var refreshInterval: TimeInterval {

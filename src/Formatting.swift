@@ -109,8 +109,13 @@ enum ProfileFormatting {
 
     /// Compact, locale-stable age of the last successful reading, e.g. "6m ago".
     static func updatedAgo(for profile: LaunchProfile) -> String {
-        guard let updatedAt = profile.usage?.updatedAt else { return "" }
-        let seconds = max(0, Int(Date().timeIntervalSince(updatedAt)))
+        ago(profile.usage?.updatedAt)
+    }
+
+    /// Compact, locale-stable age of any timestamp, e.g. "6m ago".
+    static func ago(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
         if seconds < 60 { return "just now" }
         let minutes = seconds / 60
         if minutes < 60 { return "\(minutes)m ago" }
