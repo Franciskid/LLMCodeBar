@@ -12,7 +12,7 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 **Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude and ChatGPT, per account.
 
-**Move a session to another account.** Run out mid conversation and you don't have to start over somewhere else. Open **Transfer session...**, search your Code sessions and chats, pick the account to send it to, and carry on there.
+**Import a conversation into another account.** Hit your session limit mid conversation and you don't have to start over somewhere else. Open **Transfer session...**, search your chats and Code sessions, pick the account to send it to, and carry on there with everything that was already said.
 
 ## Everything else
 
@@ -28,6 +28,8 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 - Updates itself. It checks the releases page in the background, and installs a new version and restarts on its own. Turn that off in Settings and it offers the update in the menu instead.
 
 ## About transferring sessions
+
+This is mostly what you want when one account hits its limit and you'd rather keep going on another than start the conversation again.
 
 The two kinds work very differently, because Claude stores them in very different places.
 
