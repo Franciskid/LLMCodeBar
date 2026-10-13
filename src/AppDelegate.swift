@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var config = ConfigStore.shared.loadCached()
     private var settingsWindow: SettingsWindowController?
     private var transferWindow: TransferWindowController?
+    /// The account cards in the current menu, so a switch flipped on one card can update
+    /// the others without rebuilding the open menu.
+    private var menuRows: [ProfileMenuItemView] = []
     private var refreshTimer: Timer?
     private var refreshInFlight = false
     private var updateTimer: Timer?
@@ -78,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(empty)
         } else {
             let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
+            let menuBarIDs = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
             let rows = config.profiles.map { profile in
                 ProfileMenuItemView(
                     profile: profile,
@@ -86,8 +90,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     isRefreshing: refreshInFlight,
                     isRunning: runningIDs.contains(profile.id),
                     showSparklines: config.showsSparklines,
-                    warning: warning(for: profile))
+                    warning: warning(for: profile),
+                    inMenuBar: menuBarIDs.contains(profile.id),
+                    onMenuBarToggle: { [weak self] id, on in self?.setMenuBar(id, shown: on) })
             }
+            menuRows = rows
 
             if rows.count > Self.maxVisibleAccounts {
                 // Cap the account list at maxVisibleAccounts rows tall; the rest scroll,
@@ -120,8 +127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
 
-        // Only worth offering when there's a second Claude account to move things to.
-        if config.profiles.filter({ $0.provider == .claude && $0.isPendingLogin != true }).count >= 2 {
+        // Only worth offering when there's somewhere to move things to: a second Claude
+        // account, or Claude and ChatGPT side by side.
+        let signedIn = config.profiles.filter { $0.isPendingLogin != true }
+        let claudeCount = signedIn.filter { $0.provider == .claude }.count
+        if claudeCount >= 2 || (claudeCount >= 1 && signedIn.contains { $0.provider == .codex }) {
             let transfer = NSMenuItem(title: "Transfer session...", action: #selector(showTransfer), keyEquivalent: "t")
             transfer.target = self
             transfer.isEnabled = true
@@ -155,6 +165,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
 
         statusItem.menu = menu
+    }
+
+    /// Flipped from the switch on an account card, with the menu still open. Applies the
+    /// same rule as Settings - at most two accounts, the newest one bumps the oldest -
+    /// and updates the menu bar and the other cards in place instead of rebuilding the
+    /// menu under the cursor.
+    private func setMenuBar(_ id: String, shown: Bool) {
+        var ids = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
+        if shown {
+            if !ids.contains(id) { ids.append(id) }
+            if ids.count > 2 { ids.removeFirst(ids.count - 2) }
+        } else {
+            ids.removeAll { $0 == id }
+        }
+        config.menuBarProfileIDs = ids
+        config.menuBarProfileID = ids.first
+        config.showPercentInMenuBar = !ids.isEmpty
+        ConfigStore.shared.save(config)
+        updateStatusIcon()
+        settingsWindow?.syncConfig(config)
+
+        for row in menuRows {
+            guard let toggle = row.menuBarSwitch, let rowID = row.identifier?.rawValue else { continue }
+            toggle.setOn(ids.contains(rowID), animated: true)
+        }
     }
 
     /// Flags a Claude window that is signed in to the same account as another one -

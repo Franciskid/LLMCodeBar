@@ -81,6 +81,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     // MARK: Immediate apply
 
+    /// Picks up a change made outside this window (the menu's account switches), so the
+    /// checkboxes don't show a stale state.
+    func syncConfig(_ newConfig: AppConfig) {
+        config.menuBarProfileIDs = newConfig.menuBarProfileIDs
+        config.menuBarProfileID = newConfig.menuBarProfileID
+        config.showPercentInMenuBar = newConfig.showPercentInMenuBar
+        loadSelection()
+    }
+
     private func commit(_ mutate: @escaping (inout AppConfig) -> Void) {
         mutate(&config)
         onChange(mutate)

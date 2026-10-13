@@ -2,7 +2,7 @@
 
 > Your Claude and ChatGPT limits in the menu bar. Built for running several accounts of the same provider, and auto starting your 5 hour session.
 
-![LLMCodeBar menu with two Claude accounts and a ChatGPT one](assets/screenshot.png)
+<img src="assets/screenshot.png" alt="LLMCodeBar open from the menu bar, with two Claude accounts and a ChatGPT one" width="560">
 
 ## Why this one
 
@@ -12,15 +12,18 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 **Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude and ChatGPT, per account.
 
-**Import a conversation into another account.** Hit your session limit mid conversation and you don't have to start over somewhere else. Open **Transfer session...**, search your chats and Code sessions, pick the account to send it to, and carry on there with everything that was already said.
+**Take a session to another account, or to the other agent.** Hit your limit mid task and you don't have to start over. Open **Transfer session...**, search your chats, Code sessions and Codex threads, pick where it goes, and carry on there with everything that was already said. That works between two Claude accounts, and between Claude Code and Codex in either direction.
+
+![The transfer window, moving a Code session between two Claude accounts](assets/transfer.png)
 
 ## Everything else
 
 - Session (5h) and Weekly bars for every account, with reset times.
 - A 7 day trend line per limit that goes green to red as you get close.
-- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which.
+- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Flip the **Menu bar** switch on any account in the dropdown, no need to open Settings. Turn on a third and the oldest one steps aside.
 
   <img src="assets/menubar.png" alt="Two accounts' 5h usage in the menu bar" width="72">
+- Each account shows whether auto start is on for it, right under its bars. Click anywhere else on an account to open its app.
 - Refresh from every 30 seconds to every 30 minutes.
 - Keeps your Code history where you can find it. Claude files each Code session under the window it was created in, so when a re-login puts an account in your *other* Claude window, its whole history looks gone - it isn't, that window just has an empty folder for it. LLMCodeBar keeps every account's sessions present in every window, and offers to restart a window that has to reload them. It never overwrites a session the running app owns, and a session you delete stays deleted.
 - Signs you in to the window you asked. With two Claude windows open, macOS hands a browser sign-in back to whichever one it likes, and the other one rejects it. LLMCodeBar holds the `claude://` link type, which makes Claude sign in inside its own window instead of sending you to the browser. Turn it off in Settings to hand the links back.
@@ -31,7 +34,7 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 This is mostly what you want when one account hits its limit and you'd rather keep going on another than start the conversation again.
 
-The two kinds work very differently, because Claude stores them in very different places.
+Each kind travels differently, because each one is stored somewhere very different.
 
 **Claude Code sessions really move.** The desktop app keeps a small metadata file per session inside each account's folder, and it only points at the transcript, which lives in `~/.claude/projects` and belongs to no account in particular. LLMCodeBar copies that metadata into the other account, so:
 
@@ -48,6 +51,15 @@ The two kinds work very differently, because Claude stores them in very differen
 - Text comes across, files and images don't - they stay in the original account, and the transcript just names them.
 - Very long conversations are trimmed to the most recent part, and the menu says so when that happens.
 - The new chat's link is copied to your clipboard, and the destination Claude opens straight to it when it's the only Claude window running.
+
+**Claude Code and Codex trade sessions both ways.** The two agents store sessions in unrelated formats, so the session is translated and the destination gets its own copy. They carry on independently afterwards.
+
+- **Claude Code to Codex** goes through Codex's own importer, the one built into the `codex` tool that ships inside the ChatGPT app. The thread comes out exactly as Codex would make it, and ChatGPT opens straight to it. Moving the same unchanged session twice just takes you back to the thread it made the first time.
+- **Codex to Claude Code** writes a real Claude Code transcript: Codex's messages become the conversation, its shell commands become `Bash` calls with their output, and file edits and other tools become short notes. It shows up in the destination account's Code list (restart that Claude if it was open, LLMCodeBar offers to), and `claude --resume` sees it too.
+- Very long Codex threads leave out their oldest command output so the session stays a size Claude can pick up. Messages are always kept.
+- Nothing is sent anywhere. Both directions are local file work, so it costs no usage.
+
+![Copying a Codex thread into Claude Code](assets/transfer-codex.png)
 
 ## Install
 

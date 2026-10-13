@@ -22,9 +22,12 @@ enum CodeSessionTransfer {
         var cwd: String
         var lastActivityAt: Date?
         var fileURL: URL
-        /// False when the transcript has been cleaned up, which would make the session
-        /// arrive empty - worth refusing rather than transferring a shell.
-        var hasTranscript: Bool
+        /// The transcript in `~/.claude/projects`, or nil when it has been cleaned up -
+        /// which would make the session arrive empty, so it's worth refusing rather than
+        /// transferring a shell.
+        var transcriptURL: URL?
+
+        var hasTranscript: Bool { transcriptURL != nil }
 
         /// The folder the session was working in, which is how you actually recognise it.
         var projectName: String {
@@ -91,22 +94,23 @@ enum CodeSessionTransfer {
             cwd: (json["cwd"] as? String) ?? "",
             lastActivityAt: (json["lastActivityAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) },
             fileURL: url,
-            hasTranscript: cliSessionID.map(transcriptExists) ?? false)
+            transcriptURL: cliSessionID.flatMap { transcriptURL(cliSessionID: $0) })
     }
 
+    static let projectsDirectory = URL(fileURLWithPath: NSString(string: "~/.claude/projects").expandingTildeInPath, isDirectory: true)
+
     /// Claude Code stores transcripts as `~/.claude/projects/<slugged cwd>/<id>.jsonl`.
-    /// The slug rules aren't worth reproducing - just look for the id in any project.
-    private static func transcriptExists(cliSessionID: String) -> Bool {
-        let projects = URL(fileURLWithPath: NSString(string: "~/.claude/projects").expandingTildeInPath, isDirectory: true)
+    /// The slug rules aren't worth reproducing here - just look for the id in any project.
+    private static func transcriptURL(cliSessionID: String) -> URL? {
         guard let folders = try? FileManager.default.contentsOfDirectory(
-                at: projects,
+                at: projectsDirectory,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]) else {
-            return false
+            return nil
         }
-        return folders.contains { folder in
-            FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(cliSessionID).jsonl").path)
-        }
+        return folders
+            .map { $0.appendingPathComponent("\(cliSessionID).jsonl") }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     // MARK: Transferring
@@ -191,7 +195,7 @@ enum CodeSessionTransfer {
     /// `<data dir>/claude-code-sessions/<account uuid>/<org uuid>`. The account uuid is
     /// the one already recorded for the profile; the org folder is picked by id when we
     /// know it, and otherwise by whichever one the app has been writing to.
-    private static func sessionsDirectory(for profile: LaunchProfile, orgID: String?, creatingIfNeeded: Bool = false) -> URL? {
+    static func sessionsDirectory(for profile: LaunchProfile, orgID: String?, creatingIfNeeded: Bool = false) -> URL? {
         guard let accountUUID = profile.accountUUID, !accountUUID.isEmpty else { return nil }
         let accountDirectory = URL(fileURLWithPath: Launcher.expanding(profile.dataDir), isDirectory: true)
             .appendingPathComponent(sessionsFolder, isDirectory: true)

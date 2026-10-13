@@ -1,7 +1,8 @@
 import AppKit
 
 /// The window behind "Transfer session...": everything an account has that can be moved,
-/// in one searchable list, with the accounts to move it between on top.
+/// in one searchable list, with the accounts to move it between on top. The accounts can
+/// be Claude or ChatGPT, so a coding session can also cross between Claude Code and Codex.
 ///
 /// A menu was the wrong shape for this. Chats and Code sessions both run into the
 /// hundreds, they need searching rather than scrolling, and picking the wrong destination
@@ -13,11 +14,13 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     enum Item {
         case code(CodeSessionTransfer.Session)
         case chat(ChatTransfer.ChatSummary)
+        case codex(CodexSessionTransfer.Thread)
 
         var title: String {
             switch self {
             case let .code(session): return session.displayTitle
             case let .chat(chat): return chat.displayName
+            case let .codex(thread): return thread.displayTitle
             }
         }
 
@@ -25,19 +28,35 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             switch self {
             case let .code(session): return session.lastActivityAt
             case let .chat(chat): return chat.updatedAt
+            case let .codex(thread): return thread.updatedAt
             }
         }
 
+        /// Code sessions and Codex threads are the same kind of thing for filtering: work
+        /// in a folder, as opposed to a chat.
         var isCode: Bool {
-            if case .code = self { return true }
-            return false
+            if case .chat = self { return false }
+            return true
+        }
+
+        private var projectName: String {
+            switch self {
+            case let .code(session): return session.projectName
+            case let .codex(thread): return thread.projectName
+            case .chat: return ""
+            }
         }
 
         /// The line under the title: what kind of thing this is, and where it lives.
         var detail: String {
-            var parts = [isCode ? "Code session" : "Chat"]
-            if case let .code(session) = self, !session.projectName.isEmpty {
-                parts.append(session.projectName)
+            var parts: [String]
+            switch self {
+            case .code: parts = ["Code session"]
+            case .chat: parts = ["Chat"]
+            case .codex: parts = ["Codex thread"]
+            }
+            if !projectName.isEmpty {
+                parts.append(projectName)
             }
             let age = ProfileFormatting.ago(date)
             if !age.isEmpty {
@@ -68,7 +87,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     private var isTransferring = false
 
     init(profiles: [LaunchProfile], allowKeychain: Bool) {
-        self.profiles = profiles.filter { $0.provider == .claude && $0.isPendingLogin != true }
+        self.profiles = profiles.filter { $0.isPendingLogin != true }
         self.allowKeychain = allowKeychain
 
         let window = NSWindow(
@@ -97,17 +116,23 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
     private var destination: LaunchProfile? {
         guard let source else { return nil }
-        let others = profiles.filter { $0.id != source.id }
+        let others = destinations(for: source)
         let index = destinationPopup.indexOfSelectedItem
         return others.indices.contains(index) ? others[index] : nil
+    }
+
+    /// Where a source's sessions can go. A Codex thread only has somewhere to go in
+    /// Claude: two ChatGPT windows share one Codex history, so there's nothing to move.
+    private func destinations(for source: LaunchProfile) -> [LaunchProfile] {
+        profiles.filter { $0.id != source.id && ($0.provider == .claude || source.provider == .claude) }
     }
 
     /// Accounts read better with their remaining session usage attached - it's the number
     /// you're transferring *because of*.
     private func accountTitle(_ profile: LaunchProfile) -> String {
-        let name = ChatTransfer.accountLabel(profile)
+        let name = "\(profile.provider.displayName)  ·  \(ChatTransfer.accountLabel(profile))"
         guard let percent = ProfileFormatting.primaryUsagePercent(for: profile) else { return name }
-        return "\(name)  —  \(Int(percent.rounded()))% of session used"
+        return "\(name)  —  \(Int(percent.rounded()))% used"
     }
 
     /// Start from the account that's most used up, since that's the one you're leaving.
@@ -127,14 +152,16 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     private func rebuildDestinations() {
         guard let source else { return }
         destinationPopup.removeAllItems()
-        for profile in profiles where profile.id != source.id {
+        let others = destinations(for: source)
+        for profile in others {
             destinationPopup.addItem(withTitle: accountTitle(profile))
         }
-        // Default to whichever destination has the most room left.
-        let others = profiles.filter { $0.id != source.id }
+        // Default to whichever destination has the most room left, keeping to the same
+        // app when there's a choice - a Claude chat can't go to ChatGPT at all.
         let freest = others.enumerated().min { left, right in
-            (ProfileFormatting.primaryUsagePercent(for: left.element) ?? 101)
-                < (ProfileFormatting.primaryUsagePercent(for: right.element) ?? 101)
+            let leftKey = (left.element.provider == source.provider ? 0 : 1, ProfileFormatting.primaryUsagePercent(for: left.element) ?? 101)
+            let rightKey = (right.element.provider == source.provider ? 0 : 1, ProfileFormatting.primaryUsagePercent(for: right.element) ?? 101)
+            return leftKey < rightKey
         }
         destinationPopup.selectItem(at: freest?.offset ?? 0)
     }
@@ -151,7 +178,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         if let index = profiles.firstIndex(where: { $0.id == destination.id }) {
             sourcePopup.selectItem(at: index)
             rebuildDestinations()
-            let others = profiles.filter { $0.id != destination.id }
+            let others = destinations(for: destination)
             if let back = others.firstIndex(where: { $0.id == source.id }) {
                 destinationPopup.selectItem(at: back)
             }
@@ -163,6 +190,15 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         guard let source else { return }
         loadToken += 1
         let token = loadToken
+
+        // A ChatGPT account only has Codex threads to offer, and they're on disk.
+        if source.provider == .codex {
+            spinner.stopAnimation(nil)
+            items = CodexSessionTransfer.threads(for: source).map(Item.codex)
+            applyFilter()
+            showSummary()
+            return
+        }
 
         // Code sessions come off the disk, so they're on screen immediately.
         items = CodeSessionTransfer.sessions(for: source, orgID: source.organizationUUID, limit: 200).map(Item.code)
@@ -190,8 +226,11 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func applyFilter() {
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let kind = kindFilter.selectedSegment
+        let toCodex = destination?.provider == .codex
 
         visibleItems = items.filter { item in
+            // ChatGPT has nowhere to put a Claude chat - only Code sessions cross over.
+            if toCodex && !item.isCode { return false }
             switch kind {
             case 1 where !item.isCode: return false
             case 2 where item.isCode: return false
@@ -205,7 +244,13 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
         table.reloadData()
         emptyLabel.isHidden = !visibleItems.isEmpty
-        emptyLabel.stringValue = items.isEmpty ? "Nothing to transfer from this account yet." : "Nothing matches “\(searchField.stringValue)”."
+        if items.isEmpty {
+            emptyLabel.stringValue = "Nothing to transfer from this account yet."
+        } else if toCodex && kind == 2 {
+            emptyLabel.stringValue = "Chats can only go to another Claude account."
+        } else {
+            emptyLabel.stringValue = "Nothing matches “\(searchField.stringValue)”."
+        }
         updateTransferButton()
     }
 
@@ -234,7 +279,17 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         let item = selectedItem
         transferButton.isEnabled = item != nil && destination != nil
         if let item, let destination {
-            transferButton.title = item.isCode ? "Move to \(ChatTransfer.accountLabel(destination))" : "Copy to \(ChatTransfer.accountLabel(destination))"
+            let account = ChatTransfer.accountLabel(destination)
+            switch item {
+            case .code where destination.provider == .codex:
+                transferButton.title = "Copy to Codex  ·  \(account)"
+            case .codex:
+                transferButton.title = "Copy to Claude Code  ·  \(account)"
+            case .code:
+                transferButton.title = "Move to \(account)"
+            case .chat:
+                transferButton.title = "Copy to \(account)"
+            }
         } else {
             transferButton.title = "Transfer"
         }
@@ -249,6 +304,29 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         spinner.startAnimation(nil)
 
         switch item {
+        case let .code(session) where destination.provider == .codex:
+            setStatus("Importing “\(session.displayTitle)” into Codex...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try CodexSessionTransfer.importClaudeSession(session, into: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishCodexImport(outcome, named: session.displayTitle, destination: destination)
+                }
+            }
+
+        case let .codex(thread):
+            setStatus("Copying “\(thread.displayTitle)” into Claude Code...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try CodexSessionTransfer.moveThread(thread, to: destination)
+                }
+                DispatchQueue.main.async {
+                    let note = (try? outcome.get())?.trimmed == true ? " Older tool output was left out to keep it a workable size." : ""
+                    self?.finishCodeTransfer(outcome.map(\.metadataURL), named: thread.displayTitle, destination: destination, verb: "Copied", note: note)
+                }
+            }
+
         case let .code(session):
             setStatus("Moving “\(session.displayTitle)”...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -275,21 +353,35 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         }
     }
 
-    private func finishCodeTransfer(_ outcome: Result<URL, Error>, named name: String, destination: LaunchProfile) {
+    private func finishCodexImport(_ outcome: Result<String, Error>, named name: String, destination: LaunchProfile) {
+        spinner.stopAnimation(nil)
+        isTransferring = false
+        updateTransferButton()
+
+        switch outcome {
+        case let .success(threadID):
+            setStatus("Copied “\(name)” into Codex for \(ChatTransfer.accountLabel(destination)) - opening it in ChatGPT.")
+            CodexSessionTransfer.openThread(threadID, in: destination)
+        case let .failure(error):
+            setStatus("Couldn't copy it: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func finishCodeTransfer(_ outcome: Result<URL, Error>, named name: String, destination: LaunchProfile, verb: String = "Moved", note: String = "") {
         spinner.stopAnimation(nil)
         isTransferring = false
         updateTransferButton()
 
         guard case .success = outcome else {
             if case let .failure(error) = outcome {
-                setStatus("Couldn't move it: \(error.localizedDescription)", isError: true)
+                setStatus("Couldn't \(verb == "Moved" ? "move" : "copy") it: \(error.localizedDescription)", isError: true)
             }
             return
         }
 
         let account = ChatTransfer.accountLabel(destination)
         guard CodeSessionTransfer.needsRestartToAppear(destination) else {
-            setStatus("Moved “\(name)” to \(account) - opening Claude there.")
+            setStatus("\(verb) “\(name)” to \(account) - opening Claude there.\(note)")
             try? Launcher.launch(destination)
             return
         }
@@ -304,7 +396,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         alert.addButton(withTitle: "Restart Claude")
         alert.addButton(withTitle: "Later")
         guard alert.runModal() == .alertFirstButtonReturn else {
-            setStatus("Moved “\(name)” to \(account) - restart that Claude to see it.")
+            setStatus("\(verb) “\(name)” to \(account) - restart that Claude to see it.\(note)")
             return
         }
 
@@ -313,8 +405,8 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         CodeSessionTransfer.restart(destination) { [weak self] restarted in
             self?.spinner.stopAnimation(nil)
             self?.setStatus(restarted
-                ? "Moved “\(name)” to \(account) - it's in Code there now."
-                : "Moved it, but couldn't restart \(account). Quit that Claude and reopen it.",
+                ? "\(verb) “\(name)” to \(account) - it's in Code there now.\(note)"
+                : "\(verb) it, but couldn't restart \(account). Quit that Claude and reopen it.",
                 isError: !restarted)
         }
     }
@@ -353,6 +445,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
     /// What the idle status line says: how much there is to choose from.
     private func showSummary() {
+        if source?.provider == .codex {
+            setStatus("\(items.count) Codex thread\(items.count == 1 ? "" : "s")")
+            return
+        }
         let code = items.filter(\.isCode).count
         let chats = items.count - code
         setStatus("\(code) Code session\(code == 1 ? "" : "s")  ·  \(chats) chat\(chats == 1 ? "" : "s")")
@@ -368,10 +464,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        let heading = NSTextField(labelWithString: "Move a Code session or a chat to another Claude account")
+        let heading = NSTextField(labelWithString: "Move a session or a chat to another account")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let explainer = NSTextField(wrappingLabelWithString: "A Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up, which uses a little of that account's quota.")
+        let explainer = NSTextField(wrappingLabelWithString: "Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
         explainer.font = .systemFont(ofSize: 11)
         explainer.textColor = .secondaryLabelColor
 
@@ -402,7 +498,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         destinationPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         sourcePopup.widthAnchor.constraint(equalTo: destinationPopup.widthAnchor).isActive = true
 
-        searchField.placeholderString = "Search sessions and chats"
+        searchField.placeholderString = "Search sessions, threads and chats"
         searchField.delegate = self
         kindFilter.selectedSegment = 0
         kindFilter.target = self
@@ -501,7 +597,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         ])
     }
 
-    @objc private func destinationChanged() { updateTransferButton() }
+    @objc private func destinationChanged() { applyFilter() }
 }
 
 /// One row: what it is, what it was called, and when you last touched it.
@@ -511,9 +607,17 @@ private final class ItemRowView: NSTableCellView {
 
         let badge = NSImageView()
         badge.translatesAutoresizingMaskIntoConstraints = false
-        let symbol = item.isCode ? "chevron.left.forwardslash.chevron.right" : "bubble.left.and.bubble.right"
-        badge.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.isCode ? "Code session" : "Chat")
-        badge.contentTintColor = item.isCode ? .systemGreen : .systemBlue
+        switch item {
+        case .code:
+            badge.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Code session")
+            badge.contentTintColor = .systemGreen
+        case .chat:
+            badge.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right", accessibilityDescription: "Chat")
+            badge.contentTintColor = .systemBlue
+        case .codex:
+            badge.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Codex thread")
+            badge.contentTintColor = .systemOrange
+        }
         badge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
 
         let title = NSTextField(labelWithString: item.title)
