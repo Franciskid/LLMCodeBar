@@ -187,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.syncConfig(config)
 
         for row in menuRows {
-            guard let toggle = row.menuBarSwitch, let rowID = row.identifier?.rawValue else { continue }
+            guard let toggle = row.menuBarPin, let rowID = row.identifier?.rawValue else { continue }
             toggle.setOn(ids.contains(rowID), animated: true)
         }
     }

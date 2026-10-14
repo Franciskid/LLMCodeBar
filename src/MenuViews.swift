@@ -353,9 +353,9 @@ final class ProfileMenuItemView: NSView {
         didSet { needsDisplay = true }
     }
 
-    /// The card's "Menu bar" switch, when it has one - the menu flips other cards'
-    /// switches off when a third account bumps one out of the menu bar.
-    private(set) var menuBarSwitch: MenuBarSwitchView?
+    /// The card's menu-bar pin, when it has one - the menu unpins other cards in place
+    /// when a third account bumps one out of the menu bar.
+    private(set) var menuBarPin: MenuBarPinView?
 
     init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool, showSparklines: Bool = false, warning: String? = nil, inMenuBar: Bool? = nil, onMenuBarToggle: ((String, Bool) -> Void)? = nil) {
         self.profileID = profile.id
@@ -363,10 +363,9 @@ final class ProfileMenuItemView: NSView {
         self.action = action
         let windowCount = max(1, min(2, profile.usage?.windows.count ?? 0))
         let rowHeight = showSparklines ? 52 : 35
-        // Controls only make sense for an account that's signed in.
+        // The pin and auto-start line only make sense for an account that's signed in.
         let showsControls = inMenuBar != nil && profile.isPendingLogin != true
-        let controlsHeight = showsControls ? 30 : 0
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(58 + windowCount * rowHeight + controlsHeight)))
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(58 + windowCount * rowHeight)))
         identifier = NSUserInterfaceItemIdentifier(profileID)
         wantsLayer = true
 
@@ -403,11 +402,20 @@ final class ProfileMenuItemView: NSView {
         running.font = .systemFont(ofSize: 10.5, weight: .medium)
         running.textColor = isRunning ? .systemGreen : .tertiaryLabelColor
 
-        let statusStack = NSStackView(views: [dot, running])
+        var statusViews: [NSView] = [dot, running]
+        if showsControls {
+            let pin = MenuBarPinView(isOn: inMenuBar ?? false)
+            let id = profile.id
+            pin.onToggle = { on in onMenuBarToggle?(id, on) }
+            menuBarPin = pin
+            statusViews.append(pin)
+        }
+        let statusStack = NSStackView(views: statusViews)
         statusStack.translatesAutoresizingMaskIntoConstraints = false
         statusStack.orientation = .horizontal
         statusStack.spacing = 5
         statusStack.alignment = .centerY
+        statusStack.setHuggingPriority(.required, for: .horizontal)
 
         let quotaViews: [NSView]
         if let windows = profile.usage?.windows, !windows.isEmpty {
@@ -437,22 +445,16 @@ final class ProfileMenuItemView: NSView {
         addSubview(statusStack)
         addSubview(quotaStack)
 
+        // Auto-start reads as one more fact about the account, on the subtitle's line.
+        var subtitleTrailing = subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16)
         if showsControls {
-            let toggle = MenuBarSwitchView(isOn: inMenuBar ?? false)
-            let id = profile.id
-            toggle.onToggle = { on in onMenuBarToggle?(id, on) }
-            menuBarSwitch = toggle
-            let badge = AutoStartBadgeView(isOn: profile.autoStartsSession)
-
-            let controls = NSStackView(views: [toggle, badge])
-            controls.translatesAutoresizingMaskIntoConstraints = false
-            controls.orientation = .horizontal
-            controls.spacing = 8
-            addSubview(controls)
+            let autoStart = AutoStartLabel(isOn: profile.autoStartsSession)
+            addSubview(autoStart)
             NSLayoutConstraint.activate([
-                controls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-                controls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+                autoStart.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+                autoStart.centerYAnchor.constraint(equalTo: subtitle.centerYAnchor),
             ])
+            subtitleTrailing = subtitle.trailingAnchor.constraint(lessThanOrEqualTo: autoStart.leadingAnchor, constant: -8)
         }
 
         NSLayoutConstraint.activate([
@@ -461,21 +463,21 @@ final class ProfileMenuItemView: NSView {
             icon.widthAnchor.constraint(equalToConstant: 28),
             icon.heightAnchor.constraint(equalToConstant: 28),
 
-            statusStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            statusStack.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            statusStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: showsControls ? -12 : -16),
+            statusStack.centerYAnchor.constraint(equalTo: title.centerYAnchor),
 
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            title.trailingAnchor.constraint(equalTo: statusStack.leadingAnchor, constant: -10),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: statusStack.leadingAnchor, constant: -10),
 
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-            subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            subtitleTrailing,
 
             quotaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             quotaStack.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 8),
             quotaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            quotaStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: CGFloat(-10 - controlsHeight))
+            quotaStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10)
         ])
 
         // Stretch each quota row to the full stack width so bars start at the far
@@ -533,66 +535,36 @@ final class ProfileMenuItemView: NSView {
 
 // MARK: - Account card controls
 
-/// Resolves a dynamic color for the view's current appearance - layers only take a
-/// fixed CGColor, so light/dark has to be re-resolved by hand.
-private extension NSView {
-    func cgColor(_ color: NSColor) -> CGColor {
-        var resolved = color.cgColor
-        effectiveAppearance.performAsCurrentDrawingAppearance { resolved = color.cgColor }
-        return resolved
-    }
-}
-
-/// "Menu bar" pill with a mini switch: whether this account's 5h % sits in the menu bar.
+/// A pin in the card's header: whether this account's 5h % sits in the menu bar.
 ///
-/// It lives inside the dropdown, so flipping it must not close the menu or open the app
-/// the way a click anywhere else on the card does - it takes the click for itself and
-/// animates in place: the knob springs across, the track and pill fill with color, and
-/// the pill gives a small pop.
-final class MenuBarSwitchView: NSView {
+/// Pinned, it's filled in the accent color; unpinned, it's a faint outline that firms up
+/// under the cursor. Flipping it plays one short spring - the pin drops in when pinned
+/// and lifts away when unpinned - and nothing moves after that. It takes its click for
+/// itself, so the card underneath doesn't open the app.
+final class MenuBarPinView: NSView {
     private(set) var isOn: Bool
     var onToggle: ((Bool) -> Void)?
 
-    private let track = CALayer()
-    private let knob = CALayer()
-    private let label = NSTextField(labelWithString: "Menu bar")
-    private var isHovering = false {
-        didSet { applyColors(animated: true) }
-    }
+    private let symbol = CALayer()
     private var trackingArea: NSTrackingArea?
-
-    private static let trackSize = NSSize(width: 24, height: 14)
-    private static let knobInset: CGFloat = 2
+    private var isHovering = false {
+        didSet { applyAppearance(animated: true) }
+    }
 
     init(isOn: Bool) {
         self.isOn = isOn
-        super.init(frame: .zero)
+        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.borderWidth = 1
-        toolTip = "Show this account's 5h usage in the menu bar (up to two accounts)"
+        layer?.cornerRadius = 6
+        symbol.contentsGravity = .resizeAspect
+        layer?.addSublayer(symbol)
         setAccessibilityRole(.checkBox)
         setAccessibilityLabel("Show in menu bar")
-
-        track.cornerRadius = Self.trackSize.height / 2
-        knob.cornerRadius = (Self.trackSize.height - Self.knobInset * 2) / 2
-        knob.backgroundColor = NSColor.white.cgColor
-        knob.shadowColor = NSColor.black.cgColor
-        knob.shadowOpacity = 0.3
-        knob.shadowRadius = 1.5
-        knob.shadowOffset = CGSize(width: 0, height: -0.5)
-        layer?.addSublayer(track)
-        track.addSublayer(knob)
-
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        addSubview(label)
+        updateToolTip()
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 22),
             heightAnchor.constraint(equalToConstant: 22),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8 + Self.trackSize.width + 6),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -602,93 +574,91 @@ final class MenuBarSwitchView: NSView {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        track.frame = CGRect(x: 8, y: (bounds.height - Self.trackSize.height) / 2, width: Self.trackSize.width, height: Self.trackSize.height)
-        layoutKnob()
+        symbol.frame = bounds.insetBy(dx: 4, dy: 4)
         CATransaction.commit()
-        applyColors(animated: false)
+        applyAppearance(animated: false)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        applyColors(animated: false)
+        applyAppearance(animated: false)
     }
 
-    private var knobFrame: CGRect {
-        let side = Self.trackSize.height - Self.knobInset * 2
-        let x = isOn ? Self.trackSize.width - Self.knobInset - side : Self.knobInset
-        return CGRect(x: x, y: Self.knobInset, width: side, height: side)
-    }
-
-    private func layoutKnob() {
-        knob.frame = knobFrame
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        applyAppearance(animated: false)
     }
 
     func setOn(_ on: Bool, animated: Bool) {
         guard on != isOn else { return }
         isOn = on
         setAccessibilityValue(on)
-        guard animated else {
-            needsLayout = true
-            return
-        }
+        updateToolTip()
+        applyAppearance(animated: animated)
+        guard animated else { return }
 
-        let from = knob.position
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layoutKnob()
-        CATransaction.commit()
-
-        let spring = CASpringAnimation(keyPath: "position")
-        spring.fromValue = NSValue(point: from)
-        spring.toValue = NSValue(point: knob.position)
-        spring.damping = 11
-        spring.stiffness = 260
-        spring.mass = 0.8
-        spring.initialVelocity = 4
-        spring.duration = spring.settlingDuration
-        knob.add(spring, forKey: "slide")
-
-        // A quick squash-and-stretch on the knob while it travels.
-        let squash = CAKeyframeAnimation(keyPath: "transform.scale.x")
-        squash.values = [1, 1.35, 1]
-        squash.keyTimes = [0, 0.35, 1]
-        squash.duration = 0.28
-        knob.add(squash, forKey: "squash")
-
-        if let layer {
-            // AppKit owns a view layer's anchor point (its corner), so scale around the
-            // pill's center by wrapping the scale in a move there and back.
-            func scaled(_ factor: CGFloat) -> NSValue {
-                var transform = CATransform3DMakeTranslation(bounds.midX, bounds.midY, 0)
-                transform = CATransform3DScale(transform, factor, factor, 1)
-                transform = CATransform3DTranslate(transform, -bounds.midX, -bounds.midY, 0)
-                return NSValue(caTransform3D: transform)
-            }
-            let pop = CAKeyframeAnimation(keyPath: "transform")
-            pop.values = [scaled(1), scaled(on ? 1.08 : 0.94), scaled(1)]
-            pop.keyTimes = [0, 0.4, 1]
-            pop.duration = 0.3
-            pop.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeInEaseOut)]
-            layer.add(pop, forKey: "pop")
-        }
-        applyColors(animated: true)
+        // Pinning drops the pin in from slightly above with a little overshoot;
+        // unpinning lifts it and lets it settle back. One shot, then still.
+        let drop = CASpringAnimation(keyPath: "transform")
+        let start = on
+            ? CATransform3DScale(CATransform3DMakeTranslation(0, 3, 0), 1.3, 1.3, 1)
+            : CATransform3DMakeTranslation(0, 2.5, 0)
+        drop.fromValue = NSValue(caTransform3D: start)
+        drop.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        drop.damping = 12
+        drop.stiffness = 300
+        drop.mass = 0.7
+        drop.duration = drop.settlingDuration
+        symbol.add(drop, forKey: "drop")
     }
 
-    private func applyColors(animated: Bool) {
-        guard let layer else { return }
-        let accent = NSColor.systemGreen
-        let pill = isOn ? accent.withAlphaComponent(isHovering ? 0.26 : 0.18) : NSColor.labelColor.withAlphaComponent(isHovering ? 0.12 : 0.06)
-        let border = isOn ? accent.withAlphaComponent(0.45) : NSColor.labelColor.withAlphaComponent(0.12)
-        let trackColor = isOn ? accent : NSColor.labelColor.withAlphaComponent(0.22)
+    private func updateToolTip() {
+        toolTip = isOn ? "Shown in the menu bar - click to hide" : "Show this account's 5h % in the menu bar"
+    }
+
+    private func applyAppearance(animated: Bool) {
+        let tint: NSColor = isOn ? .controlAccentColor : (isHovering ? .secondaryLabelColor : .tertiaryLabelColor)
+        let image = Self.render(isOn ? "pin.fill" : "pin", tint: tint, size: symbol.bounds.size,
+                                scale: window?.backingScaleFactor ?? 2, appearance: effectiveAppearance)
 
         CATransaction.begin()
         CATransaction.setDisableActions(!animated)
-        CATransaction.setAnimationDuration(0.22)
-        layer.backgroundColor = cgColor(pill)
-        layer.borderColor = cgColor(border)
-        track.backgroundColor = cgColor(trackColor)
+        CATransaction.setAnimationDuration(0.18)
+        symbol.contents = image
+        var hover = NSColor.clear.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            hover = NSColor.labelColor.withAlphaComponent(isHovering ? 0.08 : 0).cgColor
+        }
+        layer?.backgroundColor = hover
         CATransaction.commit()
-        label.textColor = isOn ? .labelColor : .secondaryLabelColor
+    }
+
+    /// Layers take a bitmap, not a template symbol, so tint and rasterize it here for
+    /// the current appearance and screen scale.
+    private static func render(_ name: String, tint: NSColor, size: NSSize, scale: CGFloat, appearance: NSAppearance) -> CGImage? {
+        guard size.width > 0,
+              let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: size.height, weight: .semibold)),
+              let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            return nil
+        }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        appearance.performAsCurrentDrawingAppearance {
+            let aspect = base.size.width / max(base.size.height, 1)
+            let height = size.height
+            let width = min(size.width, height * aspect)
+            let rect = NSRect(x: (size.width - width) / 2, y: 0, width: width, height: height)
+            base.draw(in: rect)
+            tint.set()
+            rect.fill(using: .sourceAtop)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
     }
 
     override func updateTrackingAreas() {
@@ -705,8 +675,8 @@ final class MenuBarSwitchView: NSView {
     /// A menu is never the key window, so the first click has to count.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// Flips on mouse-down, the same moment the card reacts to its own clicks, and takes
-    /// the click for itself so the card underneath doesn't open the app.
+    /// Flips on mouse-down, the same moment the card reacts to its own clicks, and keeps
+    /// the click so the card doesn't open the app.
     override func mouseDown(with event: NSEvent) {
         setOn(!isOn, animated: true)
         onToggle?(isOn)
@@ -719,100 +689,34 @@ final class MenuBarSwitchView: NSView {
     }
 }
 
-/// Read-only badge for the account's 5h auto-start setting. When it's on, a bolt sits in
-/// a softly breathing glow so it reads as "armed"; when it's off the badge goes quiet.
-/// It's status, not a control (that's in Settings), so a click falls through to the card
-/// and opens the app like anywhere else.
-final class AutoStartBadgeView: NSView {
-    private let isOn: Bool
-    private let glow = CALayer()
-    private let icon = NSImageView()
-    private let label: NSTextField
-
+/// The account's 5h auto-start setting, written like the rest of the card's details:
+/// a small bolt and a word, in the subtitle's type. It's status, not a control - that
+/// lives in Settings - so clicks fall through to the card and open the app.
+final class AutoStartLabel: NSStackView {
     init(isOn: Bool) {
-        self.isOn = isOn
-        label = NSTextField(labelWithString: isOn ? "Auto-start on" : "Auto-start off")
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: isOn ? "bolt.fill" : "bolt.slash", accessibilityDescription: nil)
+        icon.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
+        icon.contentTintColor = isOn ? .systemYellow : .quaternaryLabelColor
+
+        let label = NSTextField(labelWithString: isOn ? "Auto-start" : "Auto-start off")
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = isOn ? .secondaryLabelColor : .tertiaryLabelColor
+
         super.init(frame: .zero)
+        setViews([icon, label], in: .leading)
+        orientation = .horizontal
+        spacing = 3
+        alignment = .centerY
         translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.borderWidth = 1
+        setContentCompressionResistancePriority(.required, for: .horizontal)
         toolTip = isOn
             ? "LLMCodeBar starts this account's 5h window when it's idle. Change it in Settings."
-            : "This account's 5h window starts on your first message. Turn on auto-start in Settings."
-
-        glow.cornerRadius = 7
-        layer?.addSublayer(glow)
-
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = NSImage(systemSymbolName: isOn ? "bolt.fill" : "bolt.slash", accessibilityDescription: nil)
-        icon.symbolConfiguration = .init(pointSize: 9.5, weight: .bold)
-
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-
-        addSubview(icon)
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 22),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 14),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+            : "The 5h window starts on your first message. Turn on auto-start in Settings."
     }
 
     required init?(coder: NSCoder) { nil }
 
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        glow.frame = CGRect(x: 8, y: (bounds.height - 14) / 2, width: 14, height: 14)
-        CATransaction.commit()
-        applyColors()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyColors()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard isOn, window != nil else { return }
-        // Breathe: the glow behind the bolt swells and fades, forever, on the render server.
-        let breathe = CABasicAnimation(keyPath: "transform.scale")
-        breathe.fromValue = 0.7
-        breathe.toValue = 1.35
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0.9
-        fade.toValue = 0.0
-        let group = CAAnimationGroup()
-        group.animations = [breathe, fade]
-        group.duration = 1.6
-        group.repeatCount = .infinity
-        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        glow.add(group, forKey: "breathe")
-    }
-
-    private func applyColors() {
-        let tint = NSColor.systemPurple
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if isOn {
-            layer?.backgroundColor = cgColor(tint.withAlphaComponent(0.16))
-            layer?.borderColor = cgColor(tint.withAlphaComponent(0.40))
-            glow.backgroundColor = cgColor(tint.withAlphaComponent(0.55))
-        } else {
-            layer?.backgroundColor = cgColor(.clear)
-            layer?.borderColor = cgColor(NSColor.labelColor.withAlphaComponent(0.12))
-            glow.backgroundColor = cgColor(.clear)
-        }
-        CATransaction.commit()
-        icon.contentTintColor = isOn ? tint : .tertiaryLabelColor
-        label.textColor = isOn ? .labelColor : .tertiaryLabelColor
-    }
+    /// Let clicks reach the card underneath.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

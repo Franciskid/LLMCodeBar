@@ -20,10 +20,10 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 - Session (5h) and Weekly bars for every account, with reset times.
 - A 7 day trend line per limit that goes green to red as you get close.
-- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Flip the **Menu bar** switch on any account in the dropdown, no need to open Settings. Turn on a third and the oldest one steps aside.
+- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Click the pin next to any account in the dropdown to put it there or take it off, no need to open Settings. Pin a third and the oldest one steps aside.
 
   <img src="assets/menubar.png" alt="Two accounts' 5h usage in the menu bar" width="72">
-- Each account shows whether auto start is on for it, right under its bars. Click anywhere else on an account to open its app.
+- Each account says whether auto start is on for it, next to its plan. Click anywhere else on an account to open its app.
 - Refresh from every 30 seconds to every 30 minutes.
 - Keeps your Code history where you can find it. Claude files each Code session under the window it was created in, so when a re-login puts an account in your *other* Claude window, its whole history looks gone - it isn't, that window just has an empty folder for it. LLMCodeBar keeps every account's sessions present in every window, and offers to restart a window that has to reload them. It never overwrites a session the running app owns, and a session you delete stays deleted.
 - Signs you in to the window you asked. With two Claude windows open, macOS hands a browser sign-in back to whichever one it likes, and the other one rejects it. LLMCodeBar holds the `claude://` link type, which makes Claude sign in inside its own window instead of sending you to the browser. Turn it off in Settings to hand the links back.
