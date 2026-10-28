@@ -26,6 +26,9 @@ enum ClaudeUpdateCoordinator {
     private static let quitTimeout: TimeInterval = 30
     /// How long ShipIt gets to swap the bundle once the last window is gone.
     private static let installTimeout: TimeInterval = 180
+    /// How long ShipIt gets to finish up after the swap - opening Claude itself, when the
+    /// update asked it to - before we look at what it left running.
+    private static let installerExitTimeout: TimeInterval = 30
 
     /// A release sitting on disk with a ShipIt already waiting to install it.
     struct StagedUpdate {
@@ -53,6 +56,8 @@ enum ClaudeUpdateCoordinator {
         let activity: Activity
 
         var isWorking: Bool { activity == .working }
+        /// Asked of the kernel - see `processIsGone`.
+        var hasQuit: Bool { ClaudeUpdateCoordinator.processIsGone(app.processIdentifier) }
     }
 
     struct Plan {
@@ -235,6 +240,9 @@ enum ClaudeUpdateCoordinator {
     /// refuses to close leaves the update alone and reopens the ones that did close,
     /// and a swap that never happens reopens everything anyway. The one outcome never
     /// worth leaving behind is no windows at all.
+    ///
+    /// Nor one window too many: ShipIt can open Claude itself once it's done, and that
+    /// window only stays when it's one the user had.
     static func apply(_ plan: Plan, progress: @escaping (String) -> Void, completion: @escaping (Outcome) -> Void) {
         let appPath = Launcher.expanding(plan.windows[0].profile.appPath)
         let wanted = plan.update.version
@@ -252,13 +260,19 @@ enum ClaudeUpdateCoordinator {
                 // gone, so put those back: one window that won't close must never cost
                 // the user the ones that did.
                 report("Reopening...")
-                relaunch(plan.windows.filter(\.app.isTerminated).map(\.profile))
+                relaunch(plan.windows.filter(\.hasQuit).map(\.profile))
                 finish(.windowRefused(ProfileFormatting.title(for: stubborn.profile)))
                 return
             }
 
             report("Installing Claude \(wanted)...")
             let installed = waitForInstall(appPath: appPath, version: wanted)
+            if installed {
+                // ShipIt may open Claude itself on its way out, so let it finish before
+                // judging which windows are ours.
+                waitForExit(plan.update.shipIt, timeout: installerExitTimeout)
+                closeInstallerWindow(keeping: plan.windows.map(\.profile), appPath: appPath)
+            }
 
             report("Reopening...")
             relaunch(plan.windows.map(\.profile))
@@ -270,10 +284,10 @@ enum ClaudeUpdateCoordinator {
     private static func waitForQuit(_ windows: [Window]) -> Window? {
         let deadline = Date().addingTimeInterval(quitTimeout)
         while Date() < deadline {
-            if windows.allSatisfy(\.app.isTerminated) { return nil }
+            if windows.allSatisfy(\.hasQuit) { return nil }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        return windows.first { !$0.app.isTerminated }
+        return windows.first { !$0.hasQuit }
     }
 
     /// ShipIt only starts once the last window is gone, and the swap itself takes a
@@ -297,7 +311,49 @@ enum ClaudeUpdateCoordinator {
         }
     }
 
+    /// What ShipIt leaves behind. When the update was staged with
+    /// `launchAfterInstallation` it opens Claude once the swap is done - plainly, with no
+    /// `--user-data-dir`, so into the default data directory whether or not that was one
+    /// of the windows we closed. When it was, that window already is one of the user's
+    /// and `relaunch` just brings it forward. When it wasn't, it's a window they never
+    /// had open, so close it - but only while it's empty: anything with a session in it
+    /// stays.
+    private static func closeInstallerWindow(keeping profiles: [LaunchProfile], appPath: String) {
+        guard let bundleID = Launcher.bundleIdentifier(for: appPath) else { return }
+        let ours = Set(profiles.map { standardized($0.dataDir) })
+        // ShipIt is gone by now, but the app it opened can take a moment to register.
+        Thread.sleep(forTimeInterval: 2)
+        let processes = ProcessTable()
+        let transcripts = Transcripts()
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+            let pid = app.processIdentifier
+            guard pid > 0, !processIsGone(pid),
+                  let dataDir = RunningProfileDetector.dataDir(of: app, appPath: appPath, processes: processes),
+                  !ours.contains(dataDir),
+                  sessions(of: app, processes: processes, transcripts: transcripts).count == 0
+            else { continue }
+            DispatchQueue.main.async { app.terminate() }
+        }
+    }
+
+    /// Bounded, because a ShipIt that hangs after installing isn't worth holding the
+    /// user's windows back for.
+    private static func waitForExit(_ pid: pid_t, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !processIsGone(pid) {
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
     // MARK: Small shared helpers
+
+    /// Whether a process has exited, asked of the kernel. `NSRunningApplication.isTerminated`
+    /// only changes when the main run loop delivers the news - measured to stay false for
+    /// good without one - and a quit nobody notices turns into "that window refused" and
+    /// reopens nothing.
+    private static func processIsGone(_ pid: pid_t) -> Bool {
+        kill(pid, 0) != 0 && errno == ESRCH
+    }
 
     private static func version(ofBundleAt path: String) -> String? {
         let info = URL(fileURLWithPath: path, isDirectory: true)

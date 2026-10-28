@@ -195,7 +195,7 @@ enum RunningProfileDetector {
     /// Dock they fall back to a built-in default that isn't always the bundle name -
     /// the ChatGPT app still uses `Codex`, for instance. Their helper processes always
     /// spell the directory out, though, so ask those before guessing.
-    private static func dataDir(of instance: NSRunningApplication, appPath: String, processes: ProcessTable) -> String? {
+    static func dataDir(of instance: NSRunningApplication, appPath: String, processes: ProcessTable) -> String? {
         let pid = instance.processIdentifier
         if let explicit = ProcessArguments.userDataDir(forPID: pid) {
             return normalized(explicit)
