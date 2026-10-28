@@ -17,6 +17,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Windows that were handed back sessions while running. Claude reads its session
     /// list only at launch, so until it restarts the history is there but unlisted.
     private var pendingRestarts: [String: (count: Int, since: Date)] = [:]
+    /// A Claude release staged on disk that Claude can't install by itself while we keep
+    /// more than one of its windows open (see ClaudeUpdateCoordinator).
+    private var claudeUpdate: ClaudeUpdateCoordinator.Plan?
+    /// Set while we're closing and reopening Claude, so the menu says what's happening
+    /// and a second click can't start it twice.
+    private var claudeUpdateStatus: String?
+    /// The staged version we've already mentioned unprompted, so it's offered once.
+    private var offeredClaudeUpdate: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -136,6 +144,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             transfer.target = self
             transfer.isEnabled = true
             menu.addItem(transfer)
+        }
+
+        // Claude staged a release that its own updater can't install, because that
+        // updater waits for every window of the bundle to quit and we keep more open.
+        if let plan = claudeUpdate {
+            let item = NSMenuItem(
+                title: claudeUpdateStatus ?? "Install Claude \(plan.update.version)...",
+                action: #selector(finishClaudeUpdate),
+                keyEquivalent: "")
+            item.target = self
+            item.isEnabled = claudeUpdateStatus == nil
+            menu.addItem(item)
         }
 
         if let pendingUpdate {
@@ -362,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.config = refreshed
                 self.refreshInFlight = false
                 self.noteRestoredSessions(restored)
+                self.refreshClaudeUpdatePlan()
                 self.syncClaudeLinkHandler()
                 // Note: we deliberately don't reload the open Settings window here.
                 // It applies edits immediately, so reloading it would just fight the
@@ -441,6 +462,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let id = sender.representedObject as? String,
               let profile = config.profiles.first(where: { $0.id == id }) else { return }
         restartClaude(profile)
+    }
+
+    // MARK: Claude's own stalled update
+
+    /// Claude's updater waits for every window of its bundle to quit before it installs
+    /// anything, and we are the reason there is always another one. Claude answers that
+    /// by quitting a window by itself twice per release and coming back on the old
+    /// version, which is where the windows that "crash" after a couple of hours go. So
+    /// notice the staged release and let the user land it on purpose instead.
+    private func refreshClaudeUpdatePlan() {
+        guard config.offersClaudeUpdates else {
+            claudeUpdate = nil
+            return
+        }
+        // Mid-install the windows are coming and going; don't read anything into that.
+        guard claudeUpdateStatus == nil else { return }
+        let plan = ClaudeUpdateCoordinator.plan(for: config.profiles)
+        claudeUpdate = plan
+
+        // Bring it up unprompted only once per release, and only when nothing is running
+        // in any window. Otherwise it waits in the menu for a moment the user picks.
+        guard let plan, plan.isQuiet, offeredClaudeUpdate != plan.update.version else { return }
+        offeredClaudeUpdate = plan.update.version
+        offerClaudeUpdate(plan)
+    }
+
+    @objc private func finishClaudeUpdate() {
+        // Read it again - what's running changes between opening the menu and clicking.
+        guard let plan = ClaudeUpdateCoordinator.plan(for: config.profiles) else {
+            claudeUpdate = nil
+            rebuildMenu()
+            showError("Claude's update isn't waiting to install any more. Claude will stage the next one on its own.")
+            return
+        }
+        claudeUpdate = plan
+        offerClaudeUpdate(plan)
+    }
+
+    private func offerClaudeUpdate(_ plan: ClaudeUpdateCoordinator.Plan) {
+        let windows = plan.windows.count == 1 ? "it" : "them"
+        let alert = NSAlert()
+        alert.messageText = "Install Claude \(plan.update.version)?"
+        alert.informativeText = """
+        Claude downloaded \(plan.update.version) but can't install it. Its updater waits for every Claude window to quit first, and you keep more than one open, so instead it quits a window on its own twice per release and comes back on \(plan.update.installedVersion).
+
+        \(claudeUpdateCost(plan))
+
+        LLMCodeBar will close \(windows), let the update install, and open \(windows) again.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Install and Reopen")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        applyClaudeUpdate(plan)
+    }
+
+    /// What closing the windows costs at this moment, window by window, so the choice is
+    /// made with the running sessions in view instead of after the fact.
+    private func claudeUpdateCost(_ plan: ClaudeUpdateCoordinator.Plan) -> String {
+        var lines: [String] = []
+        for window in plan.windows {
+            let name = ProfileFormatting.title(for: window.profile)
+            let count = window.sessions
+            if count == 0 {
+                lines.append("\(name): nothing running.")
+                continue
+            }
+            let sessions = "\(count) Code session\(count == 1 ? "" : "s") open"
+            switch window.activity {
+            case .working:
+                lines.append("\(name): \(sessions), and one is working right now.")
+            case .idle:
+                lines.append("\(name): \(sessions), idle.")
+            case .unknown:
+                lines.append("\(name): \(sessions).")
+            }
+        }
+        if plan.sessions > 0 {
+            lines.append("The sessions keep their history and come back in the list - an answer still being written is the part that's lost.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func applyClaudeUpdate(_ plan: ClaudeUpdateCoordinator.Plan) {
+        claudeUpdateStatus = "Closing Claude..."
+        rebuildMenu()
+        ClaudeUpdateCoordinator.apply(plan, progress: { [weak self] text in
+            self?.claudeUpdateStatus = text
+            self?.rebuildMenu()
+        }, completion: { [weak self] outcome in
+            guard let self else { return }
+            self.claudeUpdateStatus = nil
+            self.claudeUpdate = nil
+            switch outcome {
+            case .installed(let version):
+                self.offeredClaudeUpdate = nil
+                self.showNotice("Claude \(version) is installed, and your windows are open again.")
+            case .windowRefused(let name):
+                self.showError("\(name) wouldn't close, so Claude is still on \(plan.update.installedVersion) and any window that did close has been opened again. Try again once that window is able to quit.")
+            case .notInstalled:
+                self.showError("Claude's windows were closed and opened again, but the update didn't install. Claude will stage it again on its own.")
+            }
+            // The windows just restarted either way, so read the new state rather than
+            // trusting what we had.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.refreshAllAsync() }
+        })
     }
 
     // MARK: Staying up to date
@@ -556,6 +684,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func showNotice(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "LLMCodeBar"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func showError(_ message: String) {

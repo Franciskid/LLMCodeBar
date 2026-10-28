@@ -236,6 +236,20 @@ final class ProcessTable {
         childrenByParent[pid] ?? []
     }
 
+    /// Every pid in the table - everything has a parent, so the children lists taken
+    /// together are the whole process list.
+    var allPIDs: [pid_t] {
+        childrenByParent.values.flatMap { $0 }
+    }
+
+    /// Children, their children, and so on, `depth` levels down. Helpers that wrap the
+    /// process you actually care about put it a level or two below the app.
+    func descendants(of pid: pid_t, depth: Int) -> [pid_t] {
+        guard depth > 0 else { return [] }
+        let direct = children(of: pid)
+        return direct + direct.flatMap { descendants(of: $0, depth: depth - 1) }
+    }
+
     private static func load() -> [pid_t: [pid_t]] {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         var size = 0

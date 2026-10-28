@@ -300,6 +300,10 @@ struct AppConfig: Codable {
     /// Take over `claude://` links so a sign-in lands in the Claude window that started
     /// it (see ClaudeLinkRouter). Defaults to on.
     var routeClaudeLinks: Bool?
+    /// Offer to finish a Claude update that its own updater can't apply while several
+    /// Claude windows are open (see ClaudeUpdateCoordinator). Defaults to on. We only
+    /// ever offer - closing a window is always the user's click.
+    var offerClaudeUpdates: Bool?
 
     /// The effective menu-bar accounts (max 2), falling back to the legacy single ID.
     var menuBarProfileIDList: [String] {
@@ -321,6 +325,8 @@ struct AppConfig: Codable {
     var autoUpdates: Bool { autoUpdate ?? true }
 
     var routesClaudeLinks: Bool { routeClaudeLinks ?? true }
+
+    var offersClaudeUpdates: Bool { offerClaudeUpdates ?? true }
 
     /// How often the background refresh timer fires. Clamped to [30s, 1h].
     var refreshInterval: TimeInterval {
