@@ -9,15 +9,18 @@ import AppKit
 /// same bundle id. ShipIt then waits indefinitely (there is no timeout; a stuck one can
 /// sit there for weeks) and the install never begins.
 ///
-/// Claude's own handling of that is worse than a no-op. It quits a window to clear the
-/// way, comes back on the old version, and records the failure per data directory as
-/// `updaterFailedInstall`, retrying twice per release. So every Claude release costs
-/// each window up to two unannounced quits - mid-conversation, with no warning - and
-/// the update still doesn't land.
+/// Claude's own handling of that is worse than a no-op. Once a window has sat idle and
+/// out of focus for ten minutes it quits it to install, expecting to come straight back
+/// on the new version - and with another window open nothing brings it back at all. It
+/// records the failure per data directory as `updaterFailedInstall` and tries twice per
+/// release, so every Claude release can cost each window two disappearances that last
+/// until someone notices, and the update still doesn't land.
 ///
 /// Running several windows off one bundle is this app's doing, so finishing the update
 /// is this app's job: quit every Claude window at a moment the user chose, let the
-/// waiting ShipIt do the swap, then open every window again.
+/// waiting ShipIt do the swap, then open every window again. Until then, put back any
+/// window Claude closes for it, and use Claude's own failure count to stop it happening
+/// twice.
 enum ClaudeUpdateCoordinator {
     /// How recently a transcript must have been written for its session to count as
     /// mid-turn.
@@ -342,6 +345,105 @@ enum ClaudeUpdateCoordinator {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !processIsGone(pid) {
             Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
+    // MARK: Windows Claude closes by itself
+
+    /// How long after Claude closes a window for an update it still counts as one to put
+    /// back. Past that the user has had time to notice it's gone and leave it that way.
+    private static let reopenWithin: TimeInterval = 10 * 60
+
+    /// A window Claude closed to install an update that can't install.
+    struct StrandedWindow {
+        let profile: LaunchProfile
+        /// When Claude closed it, from its own marker - so one closing gets one reopen.
+        let closedAt: TimeInterval
+    }
+
+    /// Windows Claude closed by itself for an update that can't land, and that update.
+    ///
+    /// Before its update quit Claude writes `stealth-relaunch` into the window's data
+    /// directory, to pick up where it was once it's back. An ordinary quit writes the same
+    /// file marked `navOnly`, plus `userQuit` when it was the user's, so a window someone
+    /// closed on purpose never shows up here. The next launch consumes the file either way.
+    ///
+    /// Stranded only while there's a plan: the update is staged, its ShipIt waiting, and
+    /// another Claude window still up - so the install can't start and nothing else will
+    /// reopen it. With every window gone it's ShipIt's turn, and we stay out of its way.
+    static func strandedWindows(in profiles: [LaunchProfile]) -> (update: StagedUpdate, windows: [StrandedWindow])? {
+        guard let plan = plan(for: profiles) else { return nil }
+        let open = Set(plan.windows.map(\.profile.id))
+        let stranded: [StrandedWindow] = profiles.compactMap { profile in
+            guard profile.provider == .claude, !open.contains(profile.id),
+                  let closedAt = closedForUpdate(dataDir: profile.dataDir) else { return nil }
+            return StrandedWindow(profile: profile, closedAt: closedAt)
+        }
+        return stranded.isEmpty ? nil : (plan.update, stranded)
+    }
+
+    /// When Claude closed this data directory's window for an update, if it did lately.
+    private static func closedForUpdate(dataDir: String) -> TimeInterval? {
+        let marker = URL(fileURLWithPath: Launcher.expanding(dataDir), isDirectory: true)
+            .appendingPathComponent("stealth-relaunch")
+        guard let data = try? Data(contentsOf: marker),
+              let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              fields["navOnly"] as? Bool != true,
+              fields["userQuit"] as? Bool != true,
+              let milliseconds = fields["ts"] as? Double else { return nil }
+        let closedAt = milliseconds / 1000
+        let age = Date().timeIntervalSince1970 - closedAt
+        return age >= 0 && age < reopenWithin ? closedAt : nil
+    }
+
+    /// Tells Claude, while this window is closed, that the update has already failed to
+    /// install for it once.
+    ///
+    /// Claude counts failed installs per data directory and stops closing a window for a
+    /// release once the count reaches two. It adds one itself when the window opens again,
+    /// so recording the first here makes this closing the only one instead of the first of
+    /// two. A count Claude already keeps for this release is left alone.
+    ///
+    /// Only while the window is closed: Claude reads this once at launch, keeps its own
+    /// copy, and rewrites the file as it goes. The file also holds Claude's sign-in, so
+    /// it's replaced whole and keeps its permissions.
+    static func recordFailedInstall(_ update: StagedUpdate, for profile: LaunchProfile) {
+        guard !RunningProfileDetector.isRunning(profile),
+              let target = releaseNumber(update.version) else { return }
+        let file = URL(fileURLWithPath: Launcher.expanding(profile.dataDir), isDirectory: true)
+            .appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: file),
+              var settings = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+
+        if let counted = settings["updaterFailedInstall"] as? [String: Any],
+           counted["appVersion"] as? String == update.installedVersion,
+           counted["targetVersion"] as? String == target,
+           counted["attempts"] as? Int ?? 0 >= 1 { return }
+
+        settings["updaterFailedInstall"] = ["appVersion": update.installedVersion, "targetVersion": target, "attempts": 1]
+        guard let updated = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .withoutEscapingSlashes]) else { return }
+        replace(file, with: updated)
+    }
+
+    /// Claude keys its failure count by the bare `x.y.z` in a version.
+    private static func releaseNumber(_ version: String) -> String? {
+        version.range(of: #"\d+\.\d+\.\d+"#, options: .regularExpression).map { String(version[$0]) }
+    }
+
+    /// Written beside the file and renamed over it, so a failure halfway leaves the old
+    /// one, and created with the old one's permissions instead of wider ones for a moment.
+    private static func replace(_ file: URL, with data: Data) {
+        let mode = ((try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o600
+        let temporary = file.deletingLastPathComponent().appendingPathComponent(".\(file.lastPathComponent).llmcodebar")
+        unlink(temporary.path)
+        let descriptor = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(mode))
+        guard descriptor >= 0 else { return }
+        let written = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+        let flushed = fsync(descriptor) == 0
+        Darwin.close(descriptor)
+        guard written == data.count, flushed, rename(temporary.path, file.path) == 0 else {
+            unlink(temporary.path)
+            return
         }
     }
 

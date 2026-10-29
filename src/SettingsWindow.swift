@@ -31,7 +31,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let autoApproveCookies = NSButton(checkboxWithTitle: "Auto-approve cookie access", target: nil, action: nil)
     private let autoUpdate = NSButton(checkboxWithTitle: "Install updates automatically", target: nil, action: nil)
     private let routeClaudeLinks = NSButton(checkboxWithTitle: "Send Claude sign-in links to the right window", target: nil, action: nil)
-    private let offerClaudeUpdates = NSButton(checkboxWithTitle: "Offer to finish Claude's updates", target: nil, action: nil)
+    private let offerClaudeUpdates = NSButton(checkboxWithTitle: "Handle Claude's updates", target: nil, action: nil)
     private let checkForUpdatesButton = NSButton(title: "Check Now", target: nil, action: nil)
 
     private let statusLabel = NSTextField(labelWithString: "")
@@ -288,10 +288,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let routeHelp = helpLabel("Claude then signs in inside its own window instead of sending you to the browser.")
 
         offerClaudeUpdates.state = config.offersClaudeUpdates ? .on : .off
-        offerClaudeUpdates.toolTip = "Claude's updater waits for every Claude window to quit before it installs, so with more than one open it never finishes - it just quits a window by itself twice per release and comes back on the old version. Turn this on to be offered a close-install-reopen that actually lands it."
+        offerClaudeUpdates.toolTip = "Claude installs an update by quitting a window once it's been idle for a while, and with more than one window open the install can't start, so that window just stays closed. With this on, LLMCodeBar opens it again straight away and offers a close-install-reopen that actually lands the update."
         offerClaudeUpdates.target = self
         offerClaudeUpdates.action = #selector(offerClaudeUpdatesChanged)
-        let claudeUpdateHelp = helpLabel("Nothing closes without your click, and your windows are opened again afterwards.")
+        let claudeUpdateHelp = helpLabel("A window Claude closes for an update comes straight back, and nothing closes without your click.")
 
         let versionLabel = NSTextField(labelWithString: "Version \(Updater.currentVersion)")
         versionLabel.textColor = .secondaryLabelColor

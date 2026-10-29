@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var claudeUpdateStatus: String?
     /// The staged version we've already mentioned unprompted, so it's offered once.
     private var offeredClaudeUpdate: String?
+    /// When Claude last closed each profile's window for an update that we put back, so
+    /// one closing is never answered with two launches.
+    private var reopenedClosings: [String: TimeInterval] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -47,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Claude claims `claude://` back every time it launches, so take it again once the
     /// new instance has settled - and keep track of which window is in front, so a chat
-    /// link opens where you were working.
+    /// link opens where you were working. When one goes, see whether Claude closed it for
+    /// an update it can't install.
     private func watchClaudeInstances() {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -60,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             ClaudeLinkRouter.noteActivation(of: app)
+        }
+        center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == ClaudeLinkRouter.claudeBundleID else { return }
+            // Let its helpers finish going, so the data directory is free to open again.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.reopenWindowsClosedForUpdate() }
         }
         syncClaudeLinkHandler()
     }
@@ -478,6 +488,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Mid-install the windows are coming and going; don't read anything into that.
         guard claudeUpdateStatus == nil else { return }
+        // Catches a closing the termination notice missed - LLMCodeBar restarting, say.
+        reopenWindowsClosedForUpdate()
         let plan = ClaudeUpdateCoordinator.plan(for: config.profiles)
         claudeUpdate = plan
 
@@ -486,6 +498,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let plan, plan.isQuiet, offeredClaudeUpdate != plan.update.version else { return }
         offeredClaudeUpdate = plan.update.version
         offerClaudeUpdate(plan)
+    }
+
+    /// Claude closes a window by itself to install an update once it has sat idle and out
+    /// of focus for ten minutes, expecting to come straight back on the new version. With
+    /// another window open the install can't start, so it doesn't come back - which is
+    /// the window that "crashes" every so often. Put it back right away, behind whatever
+    /// the user is doing, and tell Claude this release already failed for it so it doesn't
+    /// happen a second time. Claude only does this to a window with no session running,
+    /// so nothing is lost in it.
+    private func reopenWindowsClosedForUpdate() {
+        guard config.offersClaudeUpdates, claudeUpdateStatus == nil else { return }
+        let profiles = config.profiles
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let found = ClaudeUpdateCoordinator.strandedWindows(in: profiles) else { return }
+            DispatchQueue.main.async {
+                guard let self, self.claudeUpdateStatus == nil else { return }
+                let due = found.windows.filter { self.reopenedClosings[$0.profile.id] != $0.closedAt }
+                for (index, window) in due.enumerated() {
+                    self.reopenedClosings[window.profile.id] = window.closedAt
+                    ClaudeUpdateCoordinator.recordFailedInstall(found.update, for: window.profile)
+                    // One at a time, as the coordinator reopens them: Claude windows
+                    // starting together race over the bundle's shared state.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 3) {
+                        try? Launcher.launch(window.profile, quietly: true)
+                    }
+                }
+            }
+        }
     }
 
     @objc private func finishClaudeUpdate() {

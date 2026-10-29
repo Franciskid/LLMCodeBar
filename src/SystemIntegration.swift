@@ -61,7 +61,11 @@ enum AutostartManager {
 }
 
 enum Launcher {
-    static func launch(_ profile: LaunchProfile) throws {
+    /// `quietly` puts a window back without bringing it forward, for when the user is busy
+    /// with something else: `-g` keeps `open` from activating it, and Claude reads
+    /// `CLAUDE_DESKTOP_BACKGROUND_LAUNCH` - what its own update relaunch uses - so its
+    /// window doesn't take focus either. One that's already running is left where it is.
+    static func launch(_ profile: LaunchProfile, quietly: Bool = false) throws {
         let fm = FileManager.default
         let appURL = URL(fileURLWithPath: expanding(profile.appPath))
         let dataDir = expanding(profile.dataDir)
@@ -79,18 +83,33 @@ enum Launcher {
         }
 
         if let running = RunningProfileDetector.runningApplication(for: profile) {
-            running.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            if !quietly {
+                running.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
             return
         }
 
+        var options = ["-n"]
+        if quietly {
+            options += ["-g"]
+            if profile.provider == .claude {
+                options += ["--env", "CLAUDE_DESKTOP_BACKGROUND_LAUNCH=behind"]
+            }
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = [
-            "-na",
-            appURL.path,
-            "--args",
-            "--user-data-dir=\(dataDir)"
-        ]
+        process.arguments = options + ["-a", appURL.path, "--args", "--user-data-dir=\(dataDir)"]
+        if options.contains("--env") {
+            // An `open` too old for `--env` refuses the whole launch, and a window that
+            // stays closed is the one thing this was for - so try again without it.
+            process.terminationHandler = { finished in
+                guard finished.terminationStatus != 0 else { return }
+                let retry = Process()
+                retry.executableURL = finished.executableURL
+                retry.arguments = ["-n", "-g", "-a", appURL.path, "--args", "--user-data-dir=\(dataDir)"]
+                try? retry.run()
+            }
+        }
         try process.run()
     }
 
