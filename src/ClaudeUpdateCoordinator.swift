@@ -263,7 +263,7 @@ enum ClaudeUpdateCoordinator {
                 // gone, so put those back: one window that won't close must never cost
                 // the user the ones that did.
                 report("Reopening...")
-                relaunch(plan.windows.filter(\.hasQuit).map(\.profile))
+                openOneAtATime(plan.windows.filter(\.hasQuit).map(\.profile))
                 finish(.windowRefused(ProfileFormatting.title(for: stubborn.profile)))
                 return
             }
@@ -278,7 +278,7 @@ enum ClaudeUpdateCoordinator {
             }
 
             report("Reopening...")
-            relaunch(plan.windows.map(\.profile))
+            openOneAtATime(plan.windows.map(\.profile))
             finish(installed ? .installed(version: wanted) : .notInstalled)
         }
     }
@@ -305,20 +305,86 @@ enum ClaudeUpdateCoordinator {
         return false
     }
 
-    /// Opened one at a time: two Claude instances starting together race over the
-    /// bundle's shared state, and the first one up is the one that claims `claude://`.
-    private static func relaunch(_ profiles: [LaunchProfile]) {
-        for (index, profile) in profiles.enumerated() {
-            if index > 0 { Thread.sleep(forTimeInterval: 3) }
-            DispatchQueue.main.async { try? Launcher.launch(profile) }
+    // MARK: Opening windows one at a time
+
+    /// How long a window gets to finish loading before the next one is opened anyway.
+    private static let loadTimeout: TimeInterval = 40
+    /// How long a window gets to show up at all before we stop waiting on it.
+    private static let appearTimeout: TimeInterval = 15
+    /// Every Claude window we open goes through here, so two are never loading at once.
+    private static let launches = DispatchQueue(label: "LLMCodeBar.claude-launches")
+
+    /// Opens Claude windows one after another, each only once the one before has loaded,
+    /// and returns when the last has loaded or had its chance to. Never on the main thread.
+    ///
+    /// Two Claude windows starting together both came up blank - stuck before their main
+    /// view loaded, Claude logging "Timed out waiting for mainView to become ready" - and
+    /// stayed that way until quit by hand. Spacing the requests out didn't help: right
+    /// after an update `open` held the first one back while macOS took in the new bundle,
+    /// then started both at once. So this waits on the windows, not the clock. Claude
+    /// records `lastGoodMainViewLoad` in a window's config a second or so after its main
+    /// view loads, and the next window waits until that moves - or until the one before
+    /// has had `loadTimeout`, because a window that never says so mustn't keep the rest
+    /// closed.
+    static func openOneAtATime(_ profiles: [LaunchProfile], quietly: Bool = false) {
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        launches.sync {
+            for profile in profiles {
+                let appPath = Launcher.expanding(profile.appPath)
+                waitWhileAnyWindowLoads(appPath: appPath)
+                guard !RunningProfileDetector.isRunning(profile) else { continue }
+                let asked = Date()
+                DispatchQueue.main.sync { try? Launcher.launch(profile, quietly: quietly) }
+                waitUntilLoaded(profile, since: asked)
+            }
         }
+    }
+
+    private static func waitUntilLoaded(_ profile: LaunchProfile, since asked: Date) {
+        let deadline = asked.addingTimeInterval(loadTimeout)
+        while Date() < deadline {
+            if let loaded = lastGoodLoad(dataDir: profile.dataDir), loaded >= asked { return }
+            // Never started, or already gone again: nothing left to wait for.
+            if Date().timeIntervalSince(asked) > appearTimeout, !RunningProfileDetector.isRunning(profile) { return }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// Holds off while any Claude window is still loading - including ones we didn't
+    /// open, like the one ShipIt starts itself after an install.
+    private static func waitWhileAnyWindowLoads(appPath: String) {
+        guard let bundleID = Launcher.bundleIdentifier(for: appPath) else { return }
+        while true {
+            let processes = ProcessTable()
+            let loading = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains { app in
+                guard let launched = app.launchDate,
+                      Date().timeIntervalSince(launched) < loadTimeout,
+                      !processIsGone(app.processIdentifier),
+                      let dataDir = RunningProfileDetector.dataDir(of: app, appPath: appPath, processes: processes)
+                else { return false }
+                return (lastGoodLoad(dataDir: dataDir) ?? .distantPast) < launched
+            }
+            guard loading else { return }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// When Claude last finished loading this data directory's main view, as it records it.
+    private static func lastGoodLoad(dataDir: String) -> Date? {
+        let file = URL(fileURLWithPath: Launcher.expanding(dataDir), isDirectory: true)
+            .appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: file),
+              let settings = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let record = settings["lastGoodMainViewLoad"] as? [String: Any],
+              let milliseconds = record["at"] as? Double else { return nil }
+        return Date(timeIntervalSince1970: milliseconds / 1000)
     }
 
     /// What ShipIt leaves behind. When the update was staged with
     /// `launchAfterInstallation` it opens Claude once the swap is done - plainly, with no
     /// `--user-data-dir`, so into the default data directory whether or not that was one
     /// of the windows we closed. When it was, that window already is one of the user's
-    /// and `relaunch` just brings it forward. When it wasn't, it's a window they never
+    /// and `openOneAtATime` leaves it be. When it wasn't, it's a window they never
     /// had open, so close it - but only while it's empty: anything with a session in it
     /// stays.
     private static func closeInstallerWindow(keeping profiles: [LaunchProfile], appPath: String) {

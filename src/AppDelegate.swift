@@ -515,14 +515,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self, self.claudeUpdateStatus == nil else { return }
                 let due = found.windows.filter { self.reopenedClosings[$0.profile.id] != $0.closedAt }
-                for (index, window) in due.enumerated() {
+                guard !due.isEmpty else { return }
+                for window in due {
                     self.reopenedClosings[window.profile.id] = window.closedAt
                     ClaudeUpdateCoordinator.recordFailedInstall(found.update, for: window.profile)
-                    // One at a time, as the coordinator reopens them: Claude windows
-                    // starting together race over the bundle's shared state.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 3) {
-                        try? Launcher.launch(window.profile, quietly: true)
-                    }
+                }
+                DispatchQueue.global(qos: .utility).async {
+                    ClaudeUpdateCoordinator.openOneAtATime(due.map(\.profile), quietly: true)
                 }
             }
         }
