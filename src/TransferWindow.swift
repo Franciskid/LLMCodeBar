@@ -319,7 +319,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             setStatus("Copying “\(thread.displayTitle)” into Claude Code...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let outcome = Result {
-                    try CodexSessionTransfer.moveThread(thread, to: destination)
+                    try CodexSessionTransfer.moveThread(thread, from: source, to: destination)
                 }
                 DispatchQueue.main.async {
                     let note = (try? outcome.get())?.trimmed == true ? " Older tool output was left out to keep it a workable size." : ""

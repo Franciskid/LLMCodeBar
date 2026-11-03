@@ -22,7 +22,6 @@ enum CodexSessionTransfer {
         var title: String
         var cwd: String
         var updatedAt: Date?
-        var rolloutURL: URL
 
         var projectName: String {
             let name = URL(fileURLWithPath: cwd).lastPathComponent
@@ -84,7 +83,7 @@ enum CodexSessionTransfer {
         sqlite3_busy_timeout(handle, 2000)
 
         let query = """
-            SELECT id, rollout_path, cwd, COALESCE(NULLIF(name, ''), title), recency_at_ms
+            SELECT id, cwd, COALESCE(NULLIF(name, ''), title), recency_at_ms
             FROM threads
             WHERE archived = 0 AND preview <> '' AND source NOT LIKE '{%'
             ORDER BY recency_at_ms DESC
@@ -100,15 +99,12 @@ enum CodexSessionTransfer {
 
         var threads: [Thread] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            let rollout = text(1)
-            guard !rollout.isEmpty, FileManager.default.fileExists(atPath: rollout) else { continue }
-            let recency = sqlite3_column_int64(statement, 4)
+            let recency = sqlite3_column_int64(statement, 3)
             threads.append(Thread(
                 id: text(0),
-                title: text(3),
-                cwd: text(2),
-                updatedAt: recency > 0 ? Date(timeIntervalSince1970: Double(recency) / 1000) : nil,
-                rolloutURL: URL(fileURLWithPath: rollout)))
+                title: text(2),
+                cwd: text(1),
+                updatedAt: recency > 0 ? Date(timeIntervalSince1970: Double(recency) / 1000) : nil))
         }
         return threads
     }
@@ -133,19 +129,9 @@ enum CodexSessionTransfer {
         guard let transcript = session.transcriptURL else {
             throw error("That session's transcript is no longer on disk, so there's nothing to hand over.")
         }
-        guard let executable = codexExecutable(for: destination) else {
-            throw error("Couldn't find Codex inside \(Launcher.expanding(destination.appPath)). Update the ChatGPT app, then try again.")
-        }
         let home = codexHome(for: destination)
-
-        let server = try CodexAppServer(executable: executable, codexHome: home)
+        let server = try startServer(for: destination)
         defer { server.stop() }
-
-        _ = try server.request("initialize", params: [
-            "clientInfo": ["name": "llmcodebar", "title": "LLMCodeBar", "version": appVersion],
-            "capabilities": ["experimentalApi": true],
-        ])
-        server.notify("initialized")
 
         let item: [String: Any] = [
             "itemType": "SESSIONS",
@@ -178,6 +164,25 @@ enum CodexSessionTransfer {
             return existing
         }
         throw error("Codex finished the import without creating a thread.")
+    }
+
+    /// An app server running against the account's `CODEX_HOME`, past its handshake.
+    private static func startServer(for profile: LaunchProfile) throws -> CodexAppServer {
+        guard let executable = codexExecutable(for: profile) else {
+            throw error("Couldn't find Codex inside \(Launcher.expanding(profile.appPath)). Update the ChatGPT app, then try again.")
+        }
+        let server = try CodexAppServer(executable: executable, codexHome: codexHome(for: profile))
+        do {
+            _ = try server.request("initialize", params: [
+                "clientInfo": ["name": "llmcodebar", "title": "LLMCodeBar", "version": appVersion],
+                "capabilities": ["experimentalApi": true],
+            ])
+        } catch {
+            server.stop()
+            throw error
+        }
+        server.notify("initialized")
+        return server
     }
 
     private static func previouslyImportedThread(source: URL, codexHome: URL) -> String? {
@@ -215,7 +220,7 @@ enum CodexSessionTransfer {
     }
 
     /// Writes a Codex thread out as a Claude Code session in the destination account.
-    static func moveThread(_ thread: Thread, to destination: LaunchProfile) throws -> ClaudeImport {
+    static func moveThread(_ thread: Thread, from source: LaunchProfile, to destination: LaunchProfile) throws -> ClaudeImport {
         guard let directory = CodeSessionTransfer.sessionsDirectory(
                 for: destination,
                 orgID: destination.organizationUUID,
@@ -223,15 +228,15 @@ enum CodexSessionTransfer {
             throw error("Couldn't find where \(ChatTransfer.accountLabel(destination)) keeps its Code sessions. Open Claude Code in that account once, then try again.")
         }
 
-        let rollout = try CodexRollout(url: thread.rolloutURL)
-        guard rollout.steps.contains(where: \.isUserMessage) else {
+        let history = try readHistory(of: thread, from: source)
+        guard history.steps.contains(where: \.isUserMessage) else {
             throw error("That thread has no messages to bring across.")
         }
-        let cwd = rollout.cwd ?? thread.cwd
+        let cwd = history.cwd ?? thread.cwd
         let sessionID = UUID().uuidString.lowercased()
 
-        var writer = ClaudeTranscriptWriter(sessionID: sessionID, cwd: cwd, gitBranch: rollout.gitBranch)
-        let trimmed = writer.write(rollout.steps, title: thread.displayTitle)
+        var writer = ClaudeTranscriptWriter(sessionID: sessionID, cwd: cwd, gitBranch: history.gitBranch)
+        let trimmed = writer.write(history.steps, title: thread.displayTitle)
 
         let projectFolder = CodeSessionTransfer.projectsDirectory
             .appendingPathComponent(ClaudeTranscriptWriter.projectSlug(for: cwd), isDirectory: true)
@@ -243,9 +248,19 @@ enum CodexSessionTransfer {
             cliSessionID: sessionID,
             cwd: cwd,
             title: thread.displayTitle,
-            createdAt: rollout.startedAt ?? thread.updatedAt ?? Date(),
+            createdAt: history.startedAt ?? thread.updatedAt ?? Date(),
             in: directory)
         return ClaudeImport(sessionID: sessionID, metadataURL: metadataURL, transcriptURL: transcriptURL, trimmed: trimmed)
+    }
+
+    private static func readHistory(of thread: Thread, from source: LaunchProfile) throws -> CodexThreadHistory {
+        let server = try startServer(for: source)
+        defer { server.stop() }
+        let response = try server.request("thread/read", params: ["threadId": thread.id, "includeTurns": true], timeout: 120)
+        guard let json = response["thread"] as? [String: Any] else {
+            throw error("Couldn't read that Codex thread.")
+        }
+        return CodexThreadHistory(thread: json)
     }
 
     /// The desktop app's record of a session: the file that makes it show up in the Code
@@ -321,123 +336,91 @@ enum CodexStep {
     }
 }
 
-/// A Codex rollout file (`~/.codex/sessions/.../rollout-*.jsonl`).
+/// A Codex thread as its app server reports it (`thread/read`).
 ///
-/// Every record the UI shows is logged as an `item_completed` event, which is the easiest
-/// stream to follow: it carries what the user actually typed rather than the context Codex
-/// wraps around it, and a command arrives with its output already attached. Older rollouts
-/// predate those events and log `user_message` / `agent_message` instead.
-struct CodexRollout {
+/// Going through Codex rather than reading its rollout files keeps this independent of how
+/// they're stored: Codex compresses older ones to `.jsonl.zst`, which macOS has no decoder
+/// for, while its thread index keeps naming the plain `.jsonl`.
+struct CodexThreadHistory {
     var cwd: String?
     var gitBranch: String?
     var startedAt: Date?
     var steps: [CodexStep] = []
 
-    init(url: URL) throws {
-        guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else {
-            throw CodexSessionTransfer.error("Couldn't read that Codex thread.")
-        }
+    init(thread: [String: Any]) {
+        cwd = thread["cwd"] as? String
+        gitBranch = (thread["gitInfo"] as? [String: Any])?["branch"] as? String
+        startedAt = (thread["createdAt"] as? Double).map { Date(timeIntervalSince1970: $0) }
 
-        var itemSteps: [CodexStep] = []
-        var legacySteps: [CodexStep] = []
-
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let record = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let payload = record["payload"] as? [String: Any] else {
-                continue
-            }
-            let date = (record["timestamp"] as? String).flatMap(Self.parseDate)
-
-            switch record["type"] as? String {
-            case "session_meta":
-                cwd = payload["cwd"] as? String
-                gitBranch = (payload["git"] as? [String: Any])?["branch"] as? String
-                startedAt = (payload["timestamp"] as? String).flatMap(Self.parseDate) ?? date
-
-            case "event_msg":
-                switch payload["type"] as? String {
-                case "item_completed":
-                    if let item = payload["item"] as? [String: Any], let step = Self.step(for: item, date: date) {
-                        itemSteps.append(step)
-                    }
-                case "user_message":
-                    if let message = payload["message"] as? String, !message.isEmpty {
-                        legacySteps.append(.user(message, date))
-                    }
-                case "agent_message":
-                    if let message = payload["message"] as? String, !message.isEmpty {
-                        legacySteps.append(.agent(message, date))
-                    }
-                default:
-                    break
+        for turn in (thread["turns"] as? [[String: Any]]) ?? [] {
+            var date = (turn["startedAt"] as? Double).map { Date(timeIntervalSince1970: $0) }
+            for item in (turn["items"] as? [[String: Any]]) ?? [] {
+                if let milliseconds = (item["completedAtMs"] as? Double) ?? (item["startedAtMs"] as? Double) {
+                    date = Date(timeIntervalSince1970: milliseconds / 1000)
                 }
-
-            default:
-                break
+                if let step = Self.step(for: item, date: date) {
+                    steps.append(step)
+                }
             }
         }
-
-        steps = itemSteps.contains(where: \.isUserMessage) ? itemSteps : legacySteps
     }
 
     private static func step(for item: [String: Any], date: Date?) -> CodexStep? {
         switch item["type"] as? String {
-        case "UserMessage":
+        case "userMessage":
             let parts = (item["content"] as? [[String: Any]]) ?? []
             var text = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let images = parts.compactMap { part -> String? in
-                guard (part["type"] as? String)?.contains("image") == true else { return nil }
-                return (part["path"] as? String) ?? (part["url"] as? String) ?? "image"
+                switch part["type"] as? String {
+                case "localImage":
+                    return part["path"] as? String ?? "image"
+                case "image":
+                    // Pasted images come through as a data URL, far too long to quote.
+                    return (part["url"] as? String).flatMap { $0.hasPrefix("data:") ? nil : $0 } ?? "image"
+                default:
+                    return nil
+                }
             }
             if !images.isEmpty {
                 text += "\n\n" + images.map { "[Image attached in Codex: \($0)]" }.joined(separator: "\n")
             }
             return text.isEmpty ? nil : .user(text, date)
 
-        case "AgentMessage":
-            let text = ((item["content"] as? [[String: Any]]) ?? [])
-                .compactMap { $0["text"] as? String }
-                .joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        case "agentMessage":
+            let text = ((item["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : .agent(text, date)
 
-        case "CommandExecution":
-            let command: String
-            if let argv = item["command"] as? [String] {
-                // Codex runs everything as `<shell> -lc <script>`; the script is the command.
-                command = argv.count >= 3 && argv[argv.count - 2] == "-lc" ? argv[argv.count - 1] : argv.joined(separator: " ")
-            } else {
-                command = (item["command"] as? String) ?? ""
-            }
+        case "commandExecution":
+            let command = script(in: (item["command"] as? String) ?? "")
             guard !command.isEmpty else { return nil }
-            let output = (item["aggregated_output"] as? String) ?? (item["formatted_output"] as? String) ?? (item["stdout"] as? String) ?? ""
-            let exitCode = (item["exit_code"] as? Int) ?? 0
-            return .command(command, output: output, failed: exitCode != 0, date)
+            let status = item["status"] as? String
+            let failed = (item["exitCode"] as? Int ?? 0) != 0 || status == "failed" || status == "declined"
+            return .command(command, output: (item["aggregatedOutput"] as? String) ?? "", failed: failed, date)
 
-        case "FileChange":
-            let changes = (item["changes"] as? [String: [String: Any]]) ?? [:]
+        case "fileChange":
+            let changes = (item["changes"] as? [[String: Any]]) ?? []
             guard !changes.isEmpty else { return nil }
-            let lines = changes.keys.sorted().map { path -> String in
-                let change = changes[path] ?? [:]
-                switch change["type"] as? String {
+            let lines = changes.map { change -> String in
+                let path = change["path"] as? String ?? "a file"
+                switch (change["kind"] as? [String: Any])?["type"] as? String {
                 case "add":
                     return "Created `\(path)`"
                 case "delete":
                     return "Deleted `\(path)`"
                 default:
-                    let diff = (change["unified_diff"] as? String).map { "\n```diff\n\(ClaudeTranscriptWriter.clip($0, to: 1500))\n```" } ?? ""
+                    let diff = (change["diff"] as? String).map { "\n```diff\n\(ClaudeTranscriptWriter.clip($0, to: 1500))\n```" } ?? ""
                     return "Edited `\(path)`\(diff)"
                 }
             }
             return .note(lines.joined(separator: "\n"), date)
 
-        case "McpToolCall":
+        case "mcpToolCall":
             let server = item["server"] as? String ?? "tool"
             let tool = item["tool"] as? String ?? ""
             return .note("Used `\(server).\(tool)` in Codex.", date)
 
-        case "WebSearch":
+        case "webSearch":
             let query = (item["query"] as? String) ?? ""
             return .note(query.isEmpty ? "Searched the web." : "Searched the web for “\(query)”.", date)
 
@@ -446,10 +429,32 @@ struct CodexRollout {
         }
     }
 
-    private static func parseDate(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    /// Codex runs everything as `<shell> -lc <quoted script>`; the script is the command.
+    static func script(in command: String) -> String {
+        guard let shell = command.range(of: #"^\S+ -l?c "#, options: .regularExpression) else { return command }
+        let quoted = command[shell.upperBound...]
+        guard quoted.count >= 2, let quote = quoted.first, quote == "\"" || quote == "'", quoted.last == quote else {
+            return String(quoted)
+        }
+        let body = quoted.dropFirst().dropLast()
+        if quote == "'" {
+            return body.replacingOccurrences(of: #"'\''"#, with: "'")
+        }
+
+        var script = ""
+        var escaping = false
+        for character in body {
+            if escaping {
+                if !"\"\\$`".contains(character) { script.append("\\") }
+                script.append(character)
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else {
+                script.append(character)
+            }
+        }
+        return script
     }
 }
 
@@ -649,8 +654,8 @@ struct ClaudeTranscriptWriter {
 // MARK: - Talking to Codex's app server
 
 /// A short-lived `codex app-server` over stdio: newline-delimited JSON-RPC. It runs
-/// against the destination's `CODEX_HOME`, so it writes into the same thread store the
-/// ChatGPT app reads.
+/// against the account's `CODEX_HOME`, so it works on the same thread store the ChatGPT
+/// app reads.
 private final class CodexAppServer {
     private let process = Process()
     private let input = Pipe()
@@ -718,6 +723,12 @@ private final class CodexAppServer {
         guard !chunk.isEmpty else { return }
         lock.lock()
         buffer.append(chunk)
+        // A whole thread arrives as one line of many megabytes - only look for its end
+        // when a chunk can hold it, not through the whole buffer every time.
+        guard chunk.contains(0x0A) else {
+            lock.unlock()
+            return
+        }
         var parsed = 0
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer[buffer.startIndex..<newline]
