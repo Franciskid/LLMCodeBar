@@ -74,14 +74,6 @@ enum CodexSessionTransfer {
     static func threads(for profile: LaunchProfile, limit: Int = 200) -> [Thread] {
         guard let database = stateDatabase(in: codexHome(for: profile)) else { return [] }
 
-        var handle: OpaquePointer?
-        guard sqlite3_open_v2(database.path, &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            sqlite3_close(handle)
-            return []
-        }
-        defer { sqlite3_close(handle) }
-        sqlite3_busy_timeout(handle, 2000)
-
         let query = """
             SELECT id, cwd, COALESCE(NULLIF(name, ''), title), recency_at_ms
             FROM threads
@@ -89,9 +81,11 @@ enum CodexSessionTransfer {
             ORDER BY recency_at_ms DESC
             LIMIT \(limit)
             """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, query, -1, &statement, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(statement) }
+        guard let (handle, statement) = prepare(query, in: database) else { return [] }
+        defer {
+            sqlite3_finalize(statement)
+            sqlite3_close(handle)
+        }
 
         func text(_ column: Int32) -> String {
             sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
@@ -116,6 +110,34 @@ enum CodexSessionTransfer {
         return files
             .filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
             .max { version(of: $0) < version(of: $1) }
+    }
+
+    /// Opens Codex's database read-only. It's in WAL mode, and a read-only connection can't
+    /// create the `-shm` index that needs - so once Codex has closed the database and
+    /// removed its WAL files, a plain read-only open fails. With no `-wal` left everything
+    /// is in the main file, so it can then be read as immutable instead.
+    private static func prepare(_ query: String, in database: URL) -> (OpaquePointer, OpaquePointer)? {
+        var path = database.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? database.path
+        path = path.replacingOccurrences(of: "?", with: "%3f").replacingOccurrences(of: "#", with: "%23")
+        var attempts = ["mode=ro"]
+        if !FileManager.default.fileExists(atPath: database.path + "-wal") {
+            attempts.append("mode=ro&immutable=1")
+        }
+        for options in attempts {
+            var handle: OpaquePointer?
+            guard sqlite3_open_v2("file:\(path)?\(options)", &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK,
+                  let handle else {
+                sqlite3_close(handle)
+                continue
+            }
+            sqlite3_busy_timeout(handle, 2000)
+            var statement: OpaquePointer?
+            if sqlite3_prepare_v2(handle, query, -1, &statement, nil) == SQLITE_OK, let statement {
+                return (handle, statement)
+            }
+            sqlite3_close(handle)
+        }
+        return nil
     }
 
     private static func version(of url: URL) -> Int {

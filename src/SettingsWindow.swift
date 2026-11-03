@@ -179,7 +179,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             form.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
             form.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             form.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            form.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -16),
         ])
+        // The General section has outgrown the original 500pt, which left the version row
+        // below the bottom edge - size the window to whatever the form needs.
+        content.layoutSubtreeIfNeeded()
+        let needed = form.fittingSize.height + 18 + 16
+        if needed > content.frame.height {
+            window?.setContentSize(NSSize(width: content.frame.width, height: needed))
+            window?.center()
+        }
 
         if !config.profiles.isEmpty {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
