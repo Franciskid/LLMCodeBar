@@ -519,8 +519,12 @@ final class SparklineView: NSView {
 }
 
 final class QuotaWindowView: NSView {
+    private let contentHeight: CGFloat
+    override var intrinsicContentSize: NSSize { NSSize(width: 288, height: contentHeight) }
     init(window: UsageWindow, history: [Double] = [], showSparkline: Bool = false, showLabels: Bool = true, showResets: Bool = true) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 30))
+        contentHeight = showSparkline && history.count >= 2 ? 46 : 29
+        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: contentHeight))
+        heightAnchor.constraint(equalToConstant: contentHeight).isActive = true
         translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: ProfileFormatting.windowTitle(window.title))
@@ -617,13 +621,9 @@ final class ProfileMenuItemView: NSView {
         self.action = action
         let showSparklines = profile.showSparklines ?? showSparklines
         let windowCount = max(1, profile.visibleWindows().count)
-        let manualLines: [String] = (profile.showManualResets ?? true)
-            ? (profile.usage?.manualResets?.lines() ?? ["Manual resets: not refreshed yet"]) : []
-        let manualHeight = manualLines.isEmpty ? 0 : manualLines.count * 22 + 8
-        let rowHeight = showSparklines ? 52 : 35
         // The pin and auto-start line only make sense for an account that's signed in.
         let showsControls = inMenuBar != nil && profile.isPendingLogin != true
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(58 + windowCount * rowHeight + manualHeight)))
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(300 + windowCount * 52)))
         identifier = NSUserInterfaceItemIdentifier(profileID)
         wantsLayer = true
 
@@ -691,14 +691,9 @@ final class ProfileMenuItemView: NSView {
             quotaViews = [label]
         }
 
-        for (index, text) in manualLines.enumerated() {
-            let label = NSTextField(wrappingLabelWithString: text)
-            label.font = .systemFont(ofSize: 11, weight: index == 0 ? .semibold : .regular)
-            label.textColor = index == 0 ? .labelColor : .secondaryLabelColor
-            label.maximumNumberOfLines = 2
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.toolTip = profile.usage?.manualResets?.error ?? "Saved manual resets you can redeem in the provider's Usage settings. Dates are redemption deadlines."
-            quotaViews.append(label)
+        let lastQuota = quotaViews.last
+        if profile.showManualResets ?? true {
+            quotaViews.append(ManualResetView(inventory: profile.usage?.manualResets))
         }
 
         let quotaStack = NSStackView(views: quotaViews)
@@ -706,6 +701,7 @@ final class ProfileMenuItemView: NSView {
         quotaStack.orientation = .vertical
         quotaStack.spacing = 5
         quotaStack.alignment = .leading
+        if profile.showManualResets ?? true, let lastQuota { quotaStack.setCustomSpacing(10, after: lastQuota) }
 
         addSubview(icon)
         addSubview(title)
@@ -753,6 +749,10 @@ final class ProfileMenuItemView: NSView {
         for quotaView in quotaViews {
             quotaView.widthAnchor.constraint(equalTo: quotaStack.widthAnchor).isActive = true
         }
+        let rowsHeight = quotaViews.reduce(CGFloat(0)) { $0 + max(0, $1.intrinsicContentSize.height) }
+        let gaps = CGFloat(max(0, quotaViews.count - 1)) * 5 + ((profile.showManualResets ?? true) && lastQuota != nil ? 5 : 0)
+        setFrameSize(NSSize(width: 320, height: 62 + rowsHeight + gaps))
+
     }
 
     override func updateTrackingAreas() {

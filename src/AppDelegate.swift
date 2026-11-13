@@ -402,6 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     profile.showManualResets = live.showManualResets
                     profile.manualResetExpiryAlertHours = live.manualResetExpiryAlertHours
                     profile.autoStartSession = live.autoStartSession
+                    profile.menuBarLabel = live.menuBarLabel
                     return profile
                 }
                 merged.profiles += self.config.profiles.filter { live in !merged.profiles.contains { $0.id == live.id } }

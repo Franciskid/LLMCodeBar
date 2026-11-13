@@ -29,14 +29,17 @@ struct ManualResetInventory: Codable {
         for grant in held {
             var text = "\(grant.count) \(grant.kind) · "
             if let starts = grant.startsAt, starts > now { text += "from \(Self.dateText(starts)) · " }
-            text += grant.expiresAt.map { "expires \(Self.dateText($0))" } ?? "expiry not provided"
+            text += grant.expiresAt.map { Self.dateText($0) } ?? "expiry not provided"
             result.append(text)
         }
         return result
     }
 
-    static func dateText(_ date: Date) -> String {
-        DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
+    static func dateText(_ date: Date, now: Date = Date(), locale: Locale = .autoupdatingCurrent) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.setLocalizedDateFormatFromTemplate(Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: now) ? "d MMM" : "d MMM yyyy")
+        return formatter.string(from: date)
     }
 }
 

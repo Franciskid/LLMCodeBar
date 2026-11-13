@@ -77,11 +77,13 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 ## Settings
 
-Settings has separate **General**, **Menu bar**, and **Account** pages. General contains app-wide startup, refresh, updates, cookie access, and Claude window integration. Menu bar retains the 1–3 row/column grid, fill order, icon labels, weekly percentage, reset countdowns, stacked/side-by-side arrangement, and live preview. Select an account in the sidebar to open its Account page, including its custom icon label. Each account independently controls menu-bar pinning, trendlines, limit labels, session (5 hour) and weekly (7 day) bars, reset times, and auto-start.
+Settings uses a sidebar: **General** for startup, refresh, updates, cookie access, Claude integration, and macOS notification permission; **Menu bar** for grid size, fill order, icon labels, weekly percentage, quota countdowns, arrangement, and preview. Select an account to open its **Display**, **Sessions**, and **Advanced** sections. Existing preferences, pinned accounts, and custom icon labels are preserved.
+
+Each account controls its own bars, trendlines, labels, automatic reset times, and manual-reset visibility. Manual resets appear as compact inline chips with a count and short dates, such as `Fable ×1 17 nov.` or `Full ×3 30 nov. · 1 déc. · 12 déc.`. Current-year dates omit the year; no hour or “expires” prefix is shown.
 
 **Manual resets** shows the saved reset allowances on each account, grouped by kind and redemption deadline: Full, 5-hour, Weekly, or Fable. Claude's grant inventory and Codex's banked reset-credit inventory supply the counts and expiry dates. These are separate from automatic 5-hour and weekly quota timers. Expired, spent, and paused grants are excluded; upcoming grants show when they become available. If a read fails, cached counts are marked and the app never reports a failed read as a zero balance.
 
-On the Account page, **Show available manual resets and their expiry** controls their display. **Expiry alert** can notify 1, 6, 24, or 72 hours before a manual reset expires. Allow macOS notifications when prompted. This is a reminder to redeem a saved reset before its deadline; it does not notify about automatic usage-window refreshes or consume any reset. Redemption remains in the provider's own Usage settings. The app must be running to refresh and schedule alerts; macOS Focus and notification settings control delivery.
+On an account’s **Display** section, **Show in menu** controls manual-reset visibility. **Expiry notification** can notify 1, 6, 24, or 72 hours before a manual reset expires. Allow macOS notifications when prompted. This is a reminder to redeem a saved reset before its deadline; it does not notify about automatic usage-window refreshes or consume any reset. Redemption remains in the provider's own Usage settings. The app must be running to refresh and schedule alerts; macOS Focus and notification settings control delivery.
 
 ### T3 Code transfers
 
