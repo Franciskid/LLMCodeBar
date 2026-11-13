@@ -313,6 +313,18 @@ enum UsageRefresher {
         appendClaudeWindow(key: "seven_day", title: "Week", json: json, windows: &windows)
         appendClaudeWindow(key: "seven_day_sonnet", title: "Sonnet week", json: json, windows: &windows)
 
+        var manualResets = ManualResets.claude(json)
+        if manualResets == nil {
+            // Ordinary usage omits grant inventory. This GET requests the manual reset program.
+            if let response = try? SimpleHTTP.get(
+                URL(string: "https://claude.ai/api/organizations/\(orgID)/usage?cedar_ember=1&skip_spend=1")!,
+                headers: claudeHeaders(cookieHeader: cookieHeader)), response.statusCode == 200,
+               let extra = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any] {
+                manualResets = ManualResets.claude(extra)
+            }
+        }
+        manualResets = manualResets ?? ManualResets.unavailable(previous: profile.usage?.manualResets, message: "Could not read manual reset inventory")
+
         return UsageInfo(
             source: "claude-web",
             status: windows.isEmpty ? "Claude usage unavailable" : nil,
@@ -320,7 +332,8 @@ enum UsageRefresher {
             creditsRemaining: nil,
             accountEmail: profile.accountEmail,
             accountPlan: profile.accountPlan,
-            updatedAt: Date())
+            updatedAt: Date(),
+            manualResets: manualResets)
     }
 
     private static func appendClaudeWindow(key: String, title: String, json: [String: Any], windows: inout [UsageWindow]) {
@@ -386,6 +399,16 @@ enum UsageRefresher {
         let credits = json["credits"] as? [String: Any]
         let balance = flexibleDouble(credits?["balance"])
 
+        var manualResets: ManualResetInventory?
+        var resetHeaders = ["Authorization": "Bearer \(credentials.accessToken)", "Accept": "application/json", "User-Agent": "LLMCodeBar"]
+        if let id = credentials.accountID { resetHeaders["ChatGPT-Account-Id"] = id }
+        if let resetResponse = try? SimpleHTTP.get(URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!, headers: resetHeaders),
+           resetResponse.statusCode == 200,
+           let resetJSON = try? JSONSerialization.jsonObject(with: resetResponse.data) as? [String: Any] {
+            manualResets = ManualResets.codex(resetJSON)
+        }
+        manualResets = manualResets ?? ManualResets.unavailable(previous: profile.usage?.manualResets, message: "Could not read manual reset inventory")
+
         return UsageInfo(
             source: "codex-oauth",
             status: windows.isEmpty && balance == nil ? "ChatGPT usage unavailable" : nil,
@@ -393,7 +416,8 @@ enum UsageRefresher {
             creditsRemaining: balance,
             accountEmail: account?.email,
             accountPlan: plan,
-            updatedAt: Date())
+            updatedAt: Date(),
+            manualResets: manualResets)
     }
 
     private static func codexUsageResponse(credentials: CodexCredentials) throws -> HTTPResponse {

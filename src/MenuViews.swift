@@ -533,7 +533,7 @@ final class QuotaWindowView: NSView {
         used.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         used.textColor = .secondaryLabelColor
 
-        let reset = NSTextField(labelWithString: "Resets " + ProfileFormatting.resetText(for: window))
+        let reset = NSTextField(labelWithString: ProfileFormatting.resetText(for: window))
         reset.translatesAutoresizingMaskIntoConstraints = false
         reset.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
         reset.textColor = .secondaryLabelColor
@@ -547,8 +547,6 @@ final class QuotaWindowView: NSView {
         title.isHidden = !showLabels
         used.isHidden = !showLabels
         reset.isHidden = !showResets
-        reset.toolTip = window.resetsAt.map { "Resets " + DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .short) }
-        reset.setContentCompressionResistancePriority(showResets ? .required : .defaultLow, for: .horizontal)
         addSubview(title)
         addSubview(used)
         addSubview(bar)
@@ -569,7 +567,7 @@ final class QuotaWindowView: NSView {
 
             reset.trailingAnchor.constraint(equalTo: trailingAnchor),
             reset.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            reset.widthAnchor.constraint(equalToConstant: showResets ? 120 : 0),
+            reset.widthAnchor.constraint(equalToConstant: showResets ? 62 : 0),
         ]
 
         if showSparkline, history.count >= 2 {
@@ -619,10 +617,13 @@ final class ProfileMenuItemView: NSView {
         self.action = action
         let showSparklines = profile.showSparklines ?? showSparklines
         let windowCount = max(1, profile.visibleWindows().count)
+        let manualLines: [String] = (profile.showManualResets ?? true)
+            ? (profile.usage?.manualResets?.lines() ?? ["Manual resets: not refreshed yet"]) : []
+        let manualHeight = manualLines.isEmpty ? 0 : manualLines.count * 22 + 8
         let rowHeight = showSparklines ? 52 : 35
         // The pin and auto-start line only make sense for an account that's signed in.
         let showsControls = inMenuBar != nil && profile.isPendingLogin != true
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(58 + windowCount * rowHeight)))
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(58 + windowCount * rowHeight + manualHeight)))
         identifier = NSUserInterfaceItemIdentifier(profileID)
         wantsLayer = true
 
@@ -674,7 +675,7 @@ final class ProfileMenuItemView: NSView {
         statusStack.alignment = .centerY
         statusStack.setHuggingPriority(.required, for: .horizontal)
 
-        let quotaViews: [NSView]
+        var quotaViews: [NSView]
         if profile.usage?.windows.isEmpty == false {
             quotaViews = profile.visibleWindows().map { window in
                 let series = showSparklines
@@ -688,6 +689,16 @@ final class ProfileMenuItemView: NSView {
             label.font = .systemFont(ofSize: 11, weight: .medium)
             label.textColor = .secondaryLabelColor
             quotaViews = [label]
+        }
+
+        for (index, text) in manualLines.enumerated() {
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = .systemFont(ofSize: 11, weight: index == 0 ? .semibold : .regular)
+            label.textColor = index == 0 ? .labelColor : .secondaryLabelColor
+            label.maximumNumberOfLines = 2
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.toolTip = profile.usage?.manualResets?.error ?? "Saved manual resets you can redeem in the provider's Usage settings. Dates are redemption deadlines."
+            quotaViews.append(label)
         }
 
         let quotaStack = NSStackView(views: quotaViews)

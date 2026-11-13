@@ -1,11 +1,29 @@
 import Foundation
 import UserNotifications
 
-/// Schedule against the provider's reset date, independently of the polling interval.
+/// Warn about the redemption deadline of a saved manual reset, never quota-window timers.
 enum ResetReminder {
-    static func delay(reset: Date, minutes: Int, now: Date) -> TimeInterval? {
-        guard minutes > 0, reset > now else { return nil }
-        return max(1, reset.timeIntervalSince(now) - Double(minutes * 60))
+    struct Plan {
+        var id: String
+        var receiptKey: String
+        var expiry: Date
+        var delay: TimeInterval
+        var body: String
+    }
+
+    static func plans(_ profile: LaunchProfile, now: Date = Date()) -> [Plan] {
+        guard let hours = profile.manualResetExpiryAlertHours, hours > 0,
+              profile.usageStale != true, let inventory = profile.usage?.manualResets,
+              inventory.error == nil else { return [] }
+        return inventory.allowances.compactMap { allowance in
+            guard allowance.count > 0, let expiry = allowance.expiresAt, expiry > now else { return nil }
+            let fireAt = max(expiry.addingTimeInterval(-Double(hours * 3600)), allowance.startsAt ?? .distantPast)
+            guard fireAt < expiry else { return nil }
+            let key = "manual-reset.\(profile.id).\(allowance.key)"
+            return Plan(id: "\(key).\(hours)", receiptKey: key, expiry: expiry,
+                delay: max(1, fireAt.timeIntervalSince(now)),
+                body: "\(profile.accountEmail ?? profile.label): \(allowance.count) \(allowance.kind) manual reset\(allowance.count == 1 ? "" : "s") expire\(allowance.count == 1 ? "s" : "") \(ManualResetInventory.dateText(expiry)).")
+        }
     }
 
     static func requestAuthorization(profiles: [LaunchProfile]) {
@@ -19,31 +37,26 @@ enum ResetReminder {
         center.getPendingNotificationRequests { requests in
             var wanted = Set<String>()
             let pending = Set(requests.map(\.identifier))
-            for profile in profiles where profile.usageStale != true {
-                guard let minutes = profile.resetAlertMinutes, minutes > 0 else { continue }
-                for window in profile.usage?.windows ?? [] {
-                    guard let reset = window.resetsAt else { continue }
-                    guard let delay = delay(reset: reset, minutes: minutes, now: now) else { continue }
-                    let id = "reset.\(profile.id).\(window.title).\(Int(reset.timeIntervalSince1970)).\(minutes)"
-                    wanted.insert(id)
-                    if pending.contains(id) { continue }
-                    // An opt-in inside the lead time fires once, not on every poll.
-                    let key = "reset.imminent.\(profile.id).\(window.title)"
-                    let epoch = Int(reset.timeIntervalSince1970)
-                    if delay <= 1 {
-                        guard UserDefaults.standard.integer(forKey: key) != epoch else { continue }
-                    }
+            for profile in profiles {
+                for plan in plans(profile, now: now) {
+                    wanted.insert(plan.id)
+                    if pending.contains(plan.id) { continue }
+                    let epoch = Int(plan.expiry.timeIntervalSince1970)
+                    if plan.delay <= 1, UserDefaults.standard.integer(forKey: plan.receiptKey) == epoch { continue }
                     let content = UNMutableNotificationContent()
-                    content.title = "\(profile.provider.displayName) limit resets soon"
-                    content.body = "\(profile.accountEmail ?? profile.label): \(ProfileFormatting.windowTitle(window.title)) resets at \(ProfileFormatting.resetText(for: window))."
+                    content.title = "\(profile.provider.displayName) manual reset expires soon"
+                    content.body = plan.body
                     content.sound = .default
-                    center.add(UNNotificationRequest(identifier: id, content: content,
-                        trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(1, delay), repeats: false))) { error in
-                            if error == nil { UserDefaults.standard.set(epoch, forKey: key) }
+                    center.add(UNNotificationRequest(identifier: plan.id, content: content,
+                        trigger: UNTimeIntervalNotificationTrigger(timeInterval: plan.delay, repeats: false))) { error in
+                            if error == nil { UserDefaults.standard.set(epoch, forKey: plan.receiptKey) }
                         }
                 }
             }
-            center.removePendingNotificationRequests(withIdentifiers: requests.filter { $0.identifier.hasPrefix("reset.") && !wanted.contains($0.identifier) }.map(\.identifier))
+            // Also clear the automatic quota reminders mistakenly added in v0.7.0.
+            center.removePendingNotificationRequests(withIdentifiers: requests.filter {
+                ($0.identifier.hasPrefix("reset.") || $0.identifier.hasPrefix("manual-reset.")) && !wanted.contains($0.identifier)
+            }.map(\.identifier))
         }
     }
 }

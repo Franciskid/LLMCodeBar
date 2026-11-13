@@ -41,7 +41,7 @@ for quota in quotas {
     quota.layoutSubtreeIfNeeded()
     check(quota.frame.width > 250, "quota row has usable width")
     let labels = descendants(quota).compactMap { $0 as? NSTextField }
-    check(labels.last!.frame.width >= 89, "reset date has reserved width")
+    check(labels.last!.frame.width >= 61, "reset date has reserved width")
     check(labels.last!.frame.maxX <= quota.bounds.maxX + 3, "reset fits in row")
 }
 let settings = SettingsWindowController(config: AppConfig(launchAtLogin: false, profiles: [profile]), onChange: { _ in }, onCheckForUpdates: { _ in })
@@ -59,7 +59,7 @@ check(menuControls.contains { ($0 as? NSButton)?.title == "Weekly %" }, "weekly 
 check(menuControls.compactMap { $0 as? NSPopUpButton }.contains { $0.itemTitles.contains("Side by side") }, "arrangement control is preserved")
 pages.selectTabViewItem(at: 2)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
-check(descendants(pages.tabViewItems[2].view!).contains { ($0 as? NSButton)?.title == "Show reset times" }, "account reset toggle is preserved")
+check(descendants(pages.tabViewItems[2].view!).contains { ($0 as? NSButton)?.title == "Show automatic reset times" }, "account reset toggle is preserved")
 var gridConfig = AppConfig(launchAtLogin: false, profiles: [profile])
 gridConfig.setMenuBarGrid(rows: 3, columns: 3)
 for i in 0..<9 { gridConfig.setMenuBar("account-\(i)", shown: true) }
@@ -97,10 +97,30 @@ let localThreads = FileManager.default.fileExists(atPath: T3SessionTransfer.data
 print("Passed: config migration, per-account filters, reset row layout, compact settings, T3 fixture export. Local T3 schema: \(localThreads.count) threads readable.")
 
 let now = Date()
-check(ResetReminder.delay(reset: now.addingTimeInterval(3600), minutes: 15, now: now) == 2700, "reminder honors lead time")
-check(ResetReminder.delay(reset: now.addingTimeInterval(60), minutes: 15, now: now) == 1, "enabling inside lead time alerts promptly")
-check(ResetReminder.delay(reset: now.addingTimeInterval(-1), minutes: 15, now: now) == nil, "expired resets do not alert")
-check(ResetReminder.delay(reset: now.addingTimeInterval(3600), minutes: 0, now: now) == nil, "disabled reminders stay off")
+let expiry = now.addingTimeInterval(172800)
+let iso = ISO8601DateFormatter().string(from: expiry)
+let claudeGrants: [String: Any] = ["cedar_ember": ["eligible": true, "grants": [
+    ["type": "full", "resets_left": 1, "ends_at": iso, "paused": false],
+    ["type": "full", "resets_left": 2, "ends_at": iso, "gives_back_weekly": true, "label": "Fable launch"],
+    ["type": "full", "resets_left": 0, "ends_at": iso],
+    ["type": "full", "resets_left": 3, "ends_at": iso, "paused": true],
+    ["type": "full", "resets_left": 1, "ends_at": "2020-01-01T00:00:00Z"]
+]]]
+let grants = ManualResets.claude(claudeGrants, now: now)!
+check(grants.availableCount(at: now) == 3 && grants.allowances.count == 2, "manual Claude counts exclude spent, paused, and expired grants")
+check(grants.allowances.contains { $0.kind == "Fable" && $0.count == 2 }, "Fable grants stay separate from full resets")
+let codexGrants: [String: Any] = ["credits": [
+    ["reset_type": "codex_rate_limits", "status": "available", "expires_at": iso],
+    ["reset_type": "codex_rate_limits", "status": "redeemed", "expires_at": iso],
+    ["reset_type": "codex_rate_limits", "status": "available", "expires_at": NSNull()]
+]]
+check(ManualResets.codex(codexGrants, now: now)!.availableCount(at: now) == 2, "Codex banked-reset inventory is distinct from quota usage")
+profile.usage?.manualResets = grants
+profile.manualResetExpiryAlertHours = 24
+let plans = ResetReminder.plans(profile, now: now)
+check(plans.count == 2 && plans.allSatisfy { abs($0.delay - 86400) < 2 }, "expiry alerts follow grant deadlines")
+profile.usage?.manualResets = nil
+check(ResetReminder.plans(profile, now: now).isEmpty, "5h and weekly timers never generate manual reset alerts")
 if CommandLine.arguments.contains("--test-codex-import") {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("LLMCodeBar-integration-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
