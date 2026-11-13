@@ -41,6 +41,7 @@ IDENTITY="LLMCodeBar Signing"
 if security find-identity -p codesigning 2>/dev/null | grep -q "\"$IDENTITY\""; then
     codesign --force --deep --sign "$IDENTITY" "$APP" >/dev/null
 else
+    [ -n "${REQUIRE_SIGNING_IDENTITY:-}" ] && { echo "No \"$IDENTITY\" certificate in the keychain." >&2; exit 1; }
     echo "warning: signing ad hoc, no \"$IDENTITY\" certificate in the keychain" >&2
     codesign --force --deep --sign - "$APP" >/dev/null
 fi

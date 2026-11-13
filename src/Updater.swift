@@ -1,10 +1,13 @@
 import AppKit
+import CryptoKit
 
 /// A published build on the project's GitHub releases page.
 struct AppRelease {
     var version: String
     var tag: String
     var downloadURL: URL
+    /// The `.dmg.sig` published next to the image: an Ed25519 signature of its bytes.
+    var signatureURL: URL?
     var notes: String?
 }
 
@@ -29,6 +32,8 @@ enum UpdateError: LocalizedError {
     case unexpectedBundle(String)
     case versionMismatch(expected: String, found: String)
     case destinationNotWritable(String)
+    case unsigned(String)
+    case badSignature
 
     var errorDescription: String? {
         switch self {
@@ -50,6 +55,10 @@ enum UpdateError: LocalizedError {
             return "The release says \(expected) but the app inside is \(found)."
         case .destinationNotWritable(let path):
             return "No permission to replace \(path). Move LLMCodeBar to /Applications, or update it by hand."
+        case .unsigned(let tag):
+            return "Release \(tag) isn't signed, so it wasn't installed. Download it from GitHub yourself if you trust it."
+        case .badSignature:
+            return "The downloaded update doesn't carry LLMCodeBar's signature, so it wasn't installed."
         }
     }
 }
@@ -64,6 +73,11 @@ enum UpdateError: LocalizedError {
 /// installation exactly where it was.
 enum Updater {
     static let repository = "Franciskid/LLMCodeBar"
+
+    /// Releases are signed with the matching private key (`scripts/update-signing.swift`,
+    /// kept in the maintainer's keychain). A download that doesn't verify against it is
+    /// never mounted, whatever its bundle id or version say - those are trivial to fake.
+    static let signingPublicKey = "QnC1BgCnLzXfXrcLHu0RJCq0OXmhfcvgn5Lzp/kYTMk="
 
     static var currentVersion: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
@@ -98,13 +112,16 @@ enum Updater {
 
         let assets = json["assets"] as? [[String: Any]] ?? []
         let image = assets.first { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
-        guard let urlString = image?["browser_download_url"] as? String,
+        guard let imageName = image?["name"] as? String,
+              let urlString = image?["browser_download_url"] as? String,
               let downloadURL = URL(string: urlString) else {
             throw UpdateError.noDownloadableAsset(tag)
         }
+        let signature = assets.first { ($0["name"] as? String)?.lowercased() == imageName.lowercased() + ".sig" }
+        let signatureURL = (signature?["browser_download_url"] as? String).flatMap(URL.init(string:))
 
         let notes = (json["body"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return AppRelease(version: normalizedVersion(tag), tag: tag, downloadURL: downloadURL, notes: notes)
+        return AppRelease(version: normalizedVersion(tag), tag: tag, downloadURL: downloadURL, signatureURL: signatureURL, notes: notes)
     }
 
     // MARK: Installing
@@ -120,6 +137,7 @@ enum Updater {
         guard response.statusCode == 200, !response.data.isEmpty else {
             throw UpdateError.downloadFailed(response.statusCode)
         }
+        try verifySignature(of: response.data, for: release)
 
         let imagePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("LLMCodeBar-\(release.version)-\(UUID().uuidString.prefix(8)).dmg")
@@ -224,6 +242,30 @@ enum Updater {
         /usr/bin/open "$DEST"
         /bin/rm -f "$0"
         """
+    }
+
+    // MARK: Signature
+
+    static func verifySignature(of image: Data, for release: AppRelease) throws {
+        guard let signatureURL = release.signatureURL else { throw UpdateError.unsigned(release.tag) }
+        let response = try SimpleHTTP.get(signatureURL, headers: [
+            "Accept": "application/octet-stream",
+            "User-Agent": "LLMCodeBar/\(currentVersion)"
+        ], timeout: 30)
+        guard response.statusCode == 200 else { throw UpdateError.downloadFailed(response.statusCode) }
+        guard isValidSignature(String(decoding: response.data, as: UTF8.self), for: image) else {
+            throw UpdateError.badSignature
+        }
+    }
+
+    /// Whether `signatureText` (the base64 `.sig` file) is the project key's Ed25519
+    /// signature of `image`. No Apple certificate involved: the key is the project's own.
+    static func isValidSignature(_ signatureText: String, for image: Data, publicKey: String = signingPublicKey) -> Bool {
+        let text = signatureText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let signature = Data(base64Encoded: text),
+              let keyData = Data(base64Encoded: publicKey),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData) else { return false }
+        return key.isValidSignature(signature, for: image)
     }
 
     // MARK: Disk image handling
