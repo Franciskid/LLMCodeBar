@@ -33,6 +33,16 @@ rm -f "$MACOS/LLMCodeBar-arm64" "$MACOS/LLMCodeBar-x86_64"
 
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 [ -f "$ROOT/assets/AppIcon.icns" ] && cp "$ROOT/assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
-codesign --force --deep --sign - "$APP" >/dev/null
+# Signed with the "LLMCodeBar Signing" certificate when this Mac has it, so the app
+# keeps the same identity from one build to the next and macOS remembers what you allowed
+# it (Accessibility, keychain items). Without it, an ad-hoc signature: it runs, but every
+# build looks like a new app to macOS.
+IDENTITY="LLMCodeBar Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -q "\"$IDENTITY\""; then
+    codesign --force --deep --sign "$IDENTITY" "$APP" >/dev/null
+else
+    echo "warning: signing ad hoc, no \"$IDENTITY\" certificate in the keychain" >&2
+    codesign --force --deep --sign - "$APP" >/dev/null
+fi
 
 echo "Built: $APP"
