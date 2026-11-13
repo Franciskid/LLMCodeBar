@@ -288,7 +288,7 @@ enum CodexSessionTransfer {
     /// The desktop app's record of a session: the file that makes it show up in the Code
     /// list. Model, effort and permission mode follow whatever the account used last, so
     /// the moved session behaves like the account's own.
-    private static func registerSession(cliSessionID: String, cwd: String, title: String, createdAt: Date, in directory: URL) throws -> URL {
+    static func registerSession(cliSessionID: String, cwd: String, title: String, createdAt: Date, in directory: URL) throws -> URL {
         let newest = (try? FileManager.default.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey],
@@ -520,7 +520,7 @@ struct ClaudeTranscriptWriter {
     }
 
     /// Writes the steps out. Returns true when older tool output had to be dropped to fit.
-    mutating func write(_ steps: [CodexStep], title: String) -> Bool {
+    mutating func write(_ steps: [CodexStep], title: String, source: String = "Codex (the ChatGPT app)") -> Bool {
         let (fitted, trimmed) = Self.fit(steps)
 
         appendEntry([
@@ -529,7 +529,7 @@ struct ClaudeTranscriptWriter {
             "message": ["role": "user", "content": [[
                 "type": "text",
                 "text": """
-                <system-reminder>This session was moved here from Codex (the ChatGPT app). \
+                <system-reminder>This session was moved here from \(source). \
                 Everything below happened there: the messages are what was said, and the commands \
                 ran with Codex's tools. Files may have changed since, so check them again before \
                 relying on what the history says about them.\(trimmed ? " Older tool output was left out to keep the history a workable size." : "")</system-reminder>

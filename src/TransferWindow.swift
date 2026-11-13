@@ -15,12 +15,14 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         case code(CodeSessionTransfer.Session)
         case chat(ChatTransfer.ChatSummary)
         case codex(CodexSessionTransfer.Thread)
+        case t3(T3SessionTransfer.Thread)
 
         var title: String {
             switch self {
             case let .code(session): return session.displayTitle
             case let .chat(chat): return chat.displayName
             case let .codex(thread): return thread.displayTitle
+            case let .t3(thread): return thread.title
             }
         }
 
@@ -29,6 +31,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             case let .code(session): return session.lastActivityAt
             case let .chat(chat): return chat.updatedAt
             case let .codex(thread): return thread.updatedAt
+            case let .t3(thread): return thread.updatedAt
             }
         }
 
@@ -43,6 +46,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             switch self {
             case let .code(session): return session.projectName
             case let .codex(thread): return thread.projectName
+            case let .t3(thread): return URL(fileURLWithPath: thread.cwd).lastPathComponent
             case .chat: return ""
             }
         }
@@ -54,6 +58,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             case .code: parts = ["Code session"]
             case .chat: parts = ["Chat"]
             case .codex: parts = ["Codex thread"]
+            case .t3: parts = ["T3 thread"]
             }
             if !projectName.isEmpty {
                 parts.append(projectName)
@@ -109,14 +114,15 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
     // MARK: Accounts
 
+    private var isT3Source: Bool { sourcePopup.indexOfSelectedItem == profiles.count }
+
     private var source: LaunchProfile? {
         let index = sourcePopup.indexOfSelectedItem
         return profiles.indices.contains(index) ? profiles[index] : nil
     }
 
     private var destination: LaunchProfile? {
-        guard let source else { return nil }
-        let others = destinations(for: source)
+        let others = isT3Source ? profiles : source.map { destinations(for: $0) } ?? []
         let index = destinationPopup.indexOfSelectedItem
         return others.indices.contains(index) ? others[index] : nil
     }
@@ -141,6 +147,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         for profile in profiles {
             sourcePopup.addItem(withTitle: accountTitle(profile))
         }
+        sourcePopup.addItem(withTitle: "T3 Code · Local conversations")
         let busiest = profiles.enumerated().max { left, right in
             (ProfileFormatting.primaryUsagePercent(for: left.element) ?? -1)
                 < (ProfileFormatting.primaryUsagePercent(for: right.element) ?? -1)
@@ -150,6 +157,14 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private func rebuildDestinations() {
+        if isT3Source {
+            destinationPopup.removeAllItems()
+            destinationPopup.addItems(withTitles: profiles.map(accountTitle))
+            destinationPopup.selectItem(at: 0)
+            swapButton.isEnabled = false
+            return
+        }
+        swapButton.isEnabled = true
         guard let source else { return }
         destinationPopup.removeAllItems()
         let others = destinations(for: source)
@@ -187,8 +202,21 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private func reload() {
-        guard let source else { return }
         loadToken += 1
+        if isT3Source {
+            spinner.stopAnimation(nil)
+            do {
+                items = try T3SessionTransfer.threads().map(Item.t3)
+                applyFilter()
+                setStatus("\(items.count) T3 threads · Text copied; attachments and tool state stay in T3.")
+            } catch {
+                items = []
+                applyFilter()
+                setStatus(error.localizedDescription, isError: true)
+            }
+            return
+        }
+        guard let source else { return }
         let token = loadToken
 
         // A ChatGPT account only has Codex threads to offer, and they're on disk.
@@ -283,6 +311,8 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             switch item {
             case .code where destination.provider == .codex:
                 transferButton.title = "Copy to Codex  ·  \(account)"
+            case .t3:
+                transferButton.title = "Copy to \(destination.provider == .claude ? "Claude Code" : "Codex")  ·  \(account)"
             case .codex:
                 transferButton.title = "Copy to Claude Code  ·  \(account)"
             case .code:
@@ -298,12 +328,25 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     // MARK: Transferring
 
     @objc private func performTransfer() {
-        guard let item = selectedItem, let source, let destination, !isTransferring else { return }
+        guard let item = selectedItem, let destination, !isTransferring else { return }
+        let source = self.source
         isTransferring = true
         transferButton.isEnabled = false
         spinner.startAnimation(nil)
 
         switch item {
+        case let .t3(thread):
+            setStatus("Copying T3 conversation…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { try T3SessionTransfer.transfer(thread, to: destination) }
+                DispatchQueue.main.async {
+                    if destination.provider == .codex {
+                        self?.finishCodexImport(outcome.map { $0.codexID! }, named: thread.title, destination: destination)
+                    } else {
+                        self?.finishCodeTransfer(outcome.map { $0.metadata! }, named: thread.title, destination: destination, verb: "Copied")
+                    }
+                }
+            }
         case let .code(session) where destination.provider == .codex:
             setStatus("Importing “\(session.displayTitle)” into Codex...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -319,7 +362,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             setStatus("Copying “\(thread.displayTitle)” into Claude Code...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let outcome = Result {
-                    try CodexSessionTransfer.moveThread(thread, from: source, to: destination)
+                    try CodexSessionTransfer.moveThread(thread, from: source!, to: destination)
                 }
                 DispatchQueue.main.async {
                     let note = (try? outcome.get())?.trimmed == true ? " Older tool output was left out to keep it a workable size." : ""
@@ -344,7 +387,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             let profiles = self.profiles
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let outcome = Result {
-                    try ChatTransfer.transfer(chat: chat, from: source, to: destination, allowKeychain: allowKeychain)
+                    try ChatTransfer.transfer(chat: chat, from: source!, to: destination, allowKeychain: allowKeychain)
                 }
                 DispatchQueue.main.async {
                     self?.finishChatTransfer(outcome, destination: destination, profiles: profiles)
@@ -467,7 +510,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         let heading = NSTextField(labelWithString: "Move a session or a chat to another account")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let explainer = NSTextField(wrappingLabelWithString: "Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
+        let explainer = NSTextField(wrappingLabelWithString: "T3 Code conversations can be copied to Claude Code or Codex as text; attachments and tool state stay in T3. Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
         explainer.font = .systemFont(ofSize: 11)
         explainer.textColor = .secondaryLabelColor
 
@@ -614,6 +657,9 @@ private final class ItemRowView: NSTableCellView {
         case .chat:
             badge.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right", accessibilityDescription: "Chat")
             badge.contentTintColor = .systemBlue
+        case .t3:
+            badge.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "T3 conversation")
+            badge.contentTintColor = .systemPurple
         case .codex:
             badge.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Codex thread")
             badge.contentTintColor = .systemOrange

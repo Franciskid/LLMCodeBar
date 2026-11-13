@@ -77,6 +77,17 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 ## Settings
 
+Settings opens on **General** for app-wide startup, refresh, updates, cookie access, and Claude window integration. Select an account in the sidebar to open its **Account** page. Each account independently controls menu-bar pinning, trendlines, limit labels, session (5 hour) and weekly (7 day) bars, reset times, and auto-start.
+
+**Reset reminder** is off by default. Choose 5, 15, 30, or 60 minutes before reset for each account and allow macOS notifications when prompted. Reminders use the provider's reset date rather than the refresh timer. A reset with no date cannot generate a reminder. The app must be running to refresh and schedule reminders; macOS notification settings and Focus control their delivery.
+
+### T3 Code transfers
+
+Choose **Transfer session… → From → T3 Code · Local conversations**, then select a Claude or ChatGPT account. Search the list, select a thread, and copy it to Claude Code or Codex. Copying reads completed user and assistant messages from the local T3 V2 database (`~/.t3/userdata/statev2.sqlite`) without modifying T3. The working directory and message order are preserved. Claude Code receives a new transcript; Codex receives a translated transcript through its own importer. Both continue independently from the T3 conversation.
+
+Attachments, tool executions, pending replies, hidden reasoning, and provider session state are not copied. Review the destination's history before continuing; project files remain in their original working directory. Remote environments, custom T3 data directories, and legacy V1 databases are not supported in this release. T3 has no whole-thread export command; this adapter uses its current local projection schema and reports an error if that schema changes. See [T3's migration and storage documentation](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md).
+
+
 ![LLMCodeBar settings](assets/settings.png)
 
 ## How it gets the data
