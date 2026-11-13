@@ -1,11 +1,17 @@
 import AppKit
 import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var config = ConfigStore.shared.loadCached()
     private var settingsWindow: SettingsWindowController?
     private var transferWindow: TransferWindowController?
+    private var activityLogWindow: ActivityLogWindowController?
+    /// The cards and the "Continue after limits" panel of the menu that's showing.
+    private var accountsFold: AccountsFoldView?
+    private var continuePanel: ContinuePanelView?
+    private var menuIsOpen = false
+    private var rebuildWhenClosed = false
     /// The account cards in the current menu, so a switch flipped on one card can update
     /// the others without rebuilding the open menu.
     private var menuRows: [ProfileMenuItemView] = []
@@ -34,22 +40,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var reopenedClosings: [String: TimeInterval] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UNUserNotificationCenter.current().delegate = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Also the notification center's delegate: it shows banners while LLMCodeBar is
+        // in front, and acts on the buttons of the continue-after-limits notifications.
+        UsageNotifier.shared.start()
+        if config.notificationThreshold > 0 || config.notifiesOnLimitReset {
+            UsageNotifier.shared.requestPermissionIfNeeded()
+        }
         updateStatusIcon()
         rebuildMenu()
         refreshAllAsync()
         scheduleRefreshTimer()
         scheduleUpdateChecks()
         watchClaudeInstances()
+        startKeepGoing()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.updateStatusIcon()
         }
-    }
-
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
-                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
     }
 
     // MARK: claude:// links
@@ -103,13 +110,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func rebuildMenu() {
+        // An open menu is left alone (its panel updates in place); it's rebuilt once it
+        // closes, so the views it shows stay the ones this delegate talks to.
+        if menuIsOpen {
+            rebuildWhenClosed = true
+            return
+        }
+        QuotaWindowView.warnAt = Double(config.notificationThreshold > 0 ? config.notificationThreshold : 90)
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        // The cards and the "Continue after limits" panel share one item and one clock,
+        // so the menu is resized once a frame while the cards fold and the list opens.
+        let motion = MenuMotion()
+        var fold: AccountsFoldView?
         if config.profiles.isEmpty {
             let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude and ChatGPT accounts..." : "No Claude/ChatGPT accounts found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
+            menu.addItem(NSMenuItem.separator())
         } else {
             let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
             let menuBarIDs = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
@@ -137,22 +156,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }
             menuRows = rows
-
-            if rows.count > Self.maxVisibleAccounts {
-                // Cap the account list at maxVisibleAccounts cards tall; the rest scroll,
-                // so many accounts never grow the menu past a comfortable height.
-                let item = NSMenuItem()
-                item.view = Self.makeScrollingAccountsView(views: views, visibleCards: Self.maxVisibleAccounts)
-                menu.addItem(item)
-            } else {
-                for view in views {
-                    let item = NSMenuItem()
-                    item.view = view
-                    menu.addItem(item)
-                }
-            }
+            // Past maxVisibleAccounts cards, they scroll.
+            fold = AccountsFoldView(views: views, maxFullCards: Self.maxVisibleAccounts, motion: motion)
         }
+        accountsFold = fold
 
+        // Continue after limits: the checkbox, its settings, and the sessions it covers.
+        let panel = ContinuePanelView(
+            enabled: config.keepsWorkGoing,
+            sessions: KeepGoing.shared.sessions,
+            defaults: ContinueDefaults(config),
+            handlers: continueHandlers(),
+            motion: motion)
+        continuePanel = panel
+        let top = NSMenuItem()
+        top.view = MenuTopView(accounts: fold, panel: panel, motion: motion)
+        menu.addItem(top)
         menu.addItem(NSMenuItem.separator())
 
         // Sessions were handed back to a window that was already running, and Claude
@@ -200,6 +219,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             menu.addItem(item)
         }
 
+        // The app's own items, apart from the actions above.
+        if menu.items.last?.isSeparatorItem != true { menu.addItem(NSMenuItem.separator()) }
+
+        let errors = ActivityLog.shared.unseenErrors
+        let log = NSMenuItem(title: "Activity Log...", action: #selector(showActivityLog), keyEquivalent: "l")
+        log.target = self
+        log.isEnabled = true
+        if errors > 0 {
+            // A quiet count of what's new, not an alarm.
+            let title = NSMutableAttributedString(string: "Activity Log...", attributes: [.font: NSFont.menuFont(ofSize: 0)])
+            title.append(NSAttributedString(string: "   \(errors) new", attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
+                .foregroundColor: NSColor.systemRed,
+            ]))
+            log.attributedTitle = title
+        }
+        menu.addItem(log)
+
         let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         settings.isEnabled = true
@@ -216,7 +253,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         quit.isEnabled = true
         menu.addItem(quit)
 
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    // MARK: The open menu
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        KeepGoing.shared.evaluate(config: config)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        // Next time, the menu opens on the cards again, with nothing left mid-animation.
+        accountsFold?.setFolded(false, animated: false)
+        continuePanel?.setOpen(false, animated: false)
+        MenuMotion.finishShrinking()
+        if rebuildWhenClosed {
+            rebuildWhenClosed = false
+            rebuildMenu()
+        }
+    }
+
+    private func continueHandlers() -> ContinuePanelView.Handlers {
+        ContinuePanelView.Handlers(
+            toggle: { [weak self] on in self?.setKeepGoing(on) },
+            openSettings: { [weak self] in
+                self?.statusItem.menu?.cancelTracking()
+                self?.openSettings(section: "continue")
+            },
+            expanded: { [weak self] open in self?.accountsFold?.setFolded(open) },
+            change: { key, override in KeepGoing.shared.setOverride(override, for: key) },
+            act: { [weak self] key in
+                // Opening a session elsewhere closes the menu; trying again keeps it open.
+                if KeepGoing.shared.sessions.first(where: { $0.key == key })?.action?.hasPrefix("Open") == true {
+                    self?.statusItem.menu?.cancelTracking()
+                }
+                KeepGoing.shared.retry(key)
+            },
+            open: { [weak self] key in
+                self?.statusItem.menu?.cancelTracking()
+                KeepGoing.shared.open(key)
+            },
+            toggleAnswering: { [weak self] on in self?.setAnswering(on) },
+            answerNow: { key, how in KeepGoing.shared.answerNow(key, how: how) })
+    }
+
+    /// KeepGoing has news: an open menu updates its panel, a closed one is rebuilt.
+    private func keepGoingChanged() {
+        if menuIsOpen, let continuePanel {
+            continuePanel.update(enabled: config.keepsWorkGoing, sessions: KeepGoing.shared.sessions,
+                                 defaults: ContinueDefaults(config))
+        } else {
+            rebuildMenu()
+        }
     }
 
     /// Flipped from the switch on an account card, with the menu still open. Applies the
@@ -254,55 +345,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Above this many accounts, the list becomes a fixed-height scroll region.
     private static let maxVisibleAccounts = 3
-
-    /// Packs the app headings and account cards into a scroll view capped at the height
-    /// of the first `visibleCards` cards (with their headings), so the menu shows that
-    /// many at full size and scrolls the rest.
-    private static func makeScrollingAccountsView(views rows: [NSView], visibleCards: Int) -> NSView {
-        let rowWidth: CGFloat = 320
-        var visibleHeight: CGFloat = 0, cards = 0
-        for row in rows where cards < visibleCards {
-            visibleHeight += row.frame.height
-            if row is ProfileMenuItemView { cards += 1 }
-        }
-
-        let stack = NSStackView(views: rows)
-        stack.orientation = .vertical
-        stack.spacing = 0
-        stack.alignment = .leading
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for row in rows {
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.heightAnchor.constraint(equalToConstant: row.frame.height).isActive = true
-            row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-        }
-
-        let container = FlippedView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(stack)
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: rowWidth, height: visibleHeight))
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.documentView = container
-
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
-            container.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            container.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            container.widthAnchor.constraint(equalToConstant: rowWidth),
-        ])
-
-        return scroll
-    }
 
     // MARK: Transferring a chat or Code session to another account
 
@@ -356,7 +398,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    @objc private func showActivityLog() {
+        if activityLogWindow == nil {
+            activityLogWindow = ActivityLogWindowController()
+        }
+        activityLogWindow?.showWindow(nil)
+        activityLogWindow?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        rebuildMenu()
+    }
+
     @objc private func showSettings() {
+        openSettings(section: nil)
+    }
+
+    func openSettings(section: String?) {
         // Immediate apply: each settings edit mutates the live config, saves, and
         // updates the menu. No network refresh per keystroke, and nothing to "reset".
         settingsWindow = SettingsWindowController(
@@ -369,10 +425,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.scheduleRefreshTimer()
                 self.updateStatusIcon()
                 self.rebuildMenu()
+                KeepGoing.shared.evaluate(config: self.config)
             },
             onCheckForUpdates: { [weak self] report in
                 self?.checkForUpdates(userInitiated: true, report: report)
             })
+        if let section { settingsWindow?.select(sectionNamed: section) }
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -402,6 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.logRefreshChanges(from: self.config.profiles, to: refreshed.profiles)
+                UsageNotifier.shared.process(old: self.config.profiles, new: refreshed.profiles, config: self.config)
                 // A network request can finish after an edit in Settings. Merge readings
                 // into the live preferences so a slow refresh cannot undo that edit.
                 var merged = self.config
@@ -425,6 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.config = merged
                 ConfigStore.shared.save(merged)
                 ResetReminder.sync(merged.profiles)
+                KeepGoing.shared.evaluate(config: self.config)
                 self.refreshInFlight = false
                 self.noteRestoredSessions(restored)
                 self.refreshClaudeUpdatePlan()
@@ -440,6 +501,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }
         }
+    }
+
+    /// Logs a refresh error the first time it shows up, and when it clears - not on
+    /// every refresh, or a closed app would fill the log every 30 seconds.
+    private func logRefreshChanges(from old: [LaunchProfile], to new: [LaunchProfile]) {
+        for profile in new {
+            let before = old.first { $0.id == profile.id }?.refreshError
+            let source = "Usage · \(ProfileFormatting.title(for: profile))"
+            if let error = profile.refreshError, error != before {
+                ActivityLog.shared.error(source, error)
+            } else if profile.refreshError == nil, before != nil {
+                ActivityLog.shared.info(source, "Usage is updating again.")
+            }
+        }
+    }
+
+    // MARK: Continue after limits
+
+    private func startKeepGoing() {
+        KeepGoing.shared.onStatusChanged = { [weak self] in self?.keepGoingChanged() }
+        KeepGoing.shared.onWantsRefresh = { [weak self] in self?.refreshAllAsync() }
+        KeepGoing.shared.evaluate(config: config)
+    }
+
+    private func setKeepGoing(_ on: Bool) {
+        config.keepWorkGoing = on
+        ConfigStore.shared.save(config)
+        ActivityLog.shared.info("Continue after limits", on
+            ? "Turned on: sessions that reach a limit from now on continue as planned."
+            : "Turned off: nothing happens to a session at its limit.")
+        settingsWindow?.syncConfig(config)
+        if on { ClaudeWindowMessenger.requestAccessIfNeeded() }
+        KeepGoing.shared.setEnabled(on, config: config)
+        keepGoingChanged()
+    }
+
+    private func setAnswering(_ on: Bool) {
+        config.answerWhenAway = on
+        ConfigStore.shared.save(config)
+        ActivityLog.shared.info("Answer when away", on
+            ? "Turned on: a session that asks you something gets “\(config.defaultAnswer.title)” once you've been away \(config.awayAfter) min."
+            : "Turned off: questions wait for you.")
+        settingsWindow?.syncConfig(config)
+        if on { ClaudeWindowMessenger.requestAccessIfNeeded() }
+        KeepGoing.shared.evaluate(config: config)
+        keepGoingChanged()
     }
 
     // MARK: History handed back to a running window

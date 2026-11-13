@@ -103,6 +103,55 @@ enum CodexSessionTransfer {
         return threads
     }
 
+    /// Threads active since `date` with their rollout files, for spotting one the usage
+    /// limit stopped. Older rollouts are compressed and skipped - they're not recent.
+    static func recentRollouts(for profile: LaunchProfile, since date: Date) -> [(id: String, title: String, rollout: URL)] {
+        guard let database = stateDatabase(in: codexHome(for: profile)) else { return [] }
+        let query = """
+            SELECT id, rollout_path, COALESCE(NULLIF(name, ''), title), recency_at_ms
+            FROM threads
+            WHERE archived = 0 AND preview <> '' AND source NOT LIKE '{%' AND recency_at_ms > \(Int64(date.timeIntervalSince1970 * 1000))
+            ORDER BY recency_at_ms DESC
+            LIMIT 20
+            """
+        guard let (handle, statement) = prepare(query, in: database) else { return [] }
+        defer {
+            sqlite3_finalize(statement)
+            sqlite3_close(handle)
+        }
+        var threads: [(id: String, title: String, rollout: URL)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let path = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+            guard FileManager.default.fileExists(atPath: path),
+                  let id = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { continue }
+            let title = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+            let firstLine = title.components(separatedBy: .newlines).first ?? title
+            threads.append((id, firstLine.isEmpty ? "Codex thread" : firstLine, URL(fileURLWithPath: path)))
+        }
+        return threads
+    }
+
+    /// Sends a message to an existing thread and waits for Codex to finish the turn,
+    /// which can take hours. Approval requests are declined - nobody is there to judge
+    /// them - so a turn that needs one stops there instead of doing something unasked.
+    static func continueThread(_ threadID: String, in profile: LaunchProfile, saying text: String) throws -> String {
+        let server = try startServer(for: profile)
+        defer { server.stop() }
+        _ = try server.request("thread/resume", params: ["threadId": threadID, "excludeTurns": true], timeout: 120)
+        _ = try server.request("turn/start", params: [
+            "threadId": threadID,
+            "input": [["type": "text", "text": text]],
+        ], timeout: 60)
+        let completed = try server.waitForNotification("turn/completed", timeout: 6 * 3600) { params in
+            (params["threadId"] as? String).map { $0 == threadID } ?? true
+        }
+        let turn = completed["turn"] as? [String: Any]
+        if let error = turn?["error"] as? [String: Any], let message = error["message"] as? String {
+            throw self.error(message)
+        }
+        return (turn?["status"] as? String).map { "turn \($0)" } ?? "turn finished"
+    }
+
     /// `state_<n>.sqlite`, newest schema version first - the number goes up when Codex
     /// migrates, and an old file can be left behind.
     private static func stateDatabase(in home: URL) -> URL? {
@@ -205,6 +254,14 @@ enum CodexSessionTransfer {
         }
         server.notify("initialized")
         return server
+    }
+
+    /// The models the account can use, as Codex lists them in its model picker.
+    static func availableModels(for profile: LaunchProfile) -> [[String: Any]] {
+        guard let server = try? startServer(for: profile) else { return [] }
+        defer { server.stop() }
+        let response = try? server.request("model/list", params: [:])
+        return (response?["data"] as? [[String: Any]]) ?? []
     }
 
     private static func previouslyImportedThread(source: URL, codexHome: URL) -> String? {
@@ -683,6 +740,7 @@ private final class CodexAppServer {
     private let input = Pipe()
     private let output = Pipe()
     private let lock = NSLock()
+    private let writeLock = NSLock()
     private let arrived = DispatchSemaphore(value: 0)
     private var buffer = Data()
     private var messages: [[String: Any]] = []
@@ -738,6 +796,8 @@ private final class CodexAppServer {
     private func send(_ message: [String: Any]) throws {
         var line = try JSONSerialization.data(withJSONObject: message)
         line.append(0x0A)
+        writeLock.lock()
+        defer { writeLock.unlock() }
         try input.fileHandleForWriting.write(contentsOf: line)
     }
 
@@ -756,6 +816,10 @@ private final class CodexAppServer {
             let line = buffer[buffer.startIndex..<newline]
             buffer.removeSubrange(buffer.startIndex...newline)
             if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                if message["method"] != nil, let id = message["id"] {
+                    answerServerRequest(message, id: id)
+                    continue
+                }
                 messages.append(message)
                 parsed += 1
             }
@@ -764,6 +828,22 @@ private final class CodexAppServer {
         for _ in 0..<parsed {
             arrived.signal()
         }
+    }
+
+    /// Codex asks its client before running an unapproved command or applying a patch.
+    /// LLMCodeBar has no one to ask, so it declines; anything else gets an error.
+    private func answerServerRequest(_ message: [String: Any], id: Any) {
+        let method = message["method"] as? String ?? ""
+        let reply: [String: Any]
+        if method.lowercased().contains("approval") {
+            // The older approval requests spell the refusal differently.
+            let decline = method == "applyPatchApproval" || method == "execCommandApproval" ? "denied" : "decline"
+            reply = ["id": id, "result": ["decision": decline]]
+            ActivityLog.shared.info("Keep going", "Declined a Codex approval request (\(method)) - nobody was there to answer it.")
+        } else {
+            reply = ["id": id, "error": ["code": -32601, "message": "LLMCodeBar can't answer \(method)"]]
+        }
+        DispatchQueue.global(qos: .utility).async { try? self.send(reply) }
     }
 
     private func waitFor(timeout: TimeInterval, description: String, _ matches: ([String: Any]) -> Bool) throws -> [String: Any] {

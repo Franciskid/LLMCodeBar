@@ -69,6 +69,34 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let offerClaudeUpdates = NSButton(checkboxWithTitle: "Handle Claude's updates", target: nil, action: nil)
     private let checkForUpdatesButton = NSButton(title: "Check Now", target: nil, action: nil)
 
+    // Limit notifications (General).
+    private let notifyPopup = NSPopUpButton()
+    private let notifyOnReset = NSButton(checkboxWithTitle: "Notify when a used-up limit resets", target: nil, action: nil)
+    private let notifyOptions: [(title: String, percent: Int)] = [
+        ("Off", 0), ("75%", 75), ("80%", 80), ("90%", 90), ("95%", 95),
+    ]
+
+    // Continue after limits.
+    private let continueNavigation = SettingsNavigationButton(title: "Continue after limits", target: nil, action: nil)
+    private let continuePage = NSStackView()
+    private let keepGoing = NSButton(checkboxWithTitle: "Continue sessions after a limit", target: nil, action: nil)
+    private let continuePlanPopup = NSPopUpButton()
+    private let continueMessageField = NSTextField()
+    private let ringStack = NSStackView()
+    private let readinessStack = NSStackView()
+    private let answerAway = NSButton(checkboxWithTitle: "Answer for me when I'm away", target: nil, action: nil)
+    private let answerTextQuestions = NSButton(checkboxWithTitle: "Also answer turns that just end on a “?”", target: nil, action: nil)
+    private let awayPopup = NSPopUpButton()
+    private let answerPopup = NSPopUpButton()
+    private let decideField = NSTextField()
+    private let aroundField = NSTextField()
+    private let awayOptions = [5, 10, 20, 30]
+    private let continuePlans: [(title: String, plan: KeepGoing.Plan)] = [
+        ("Continue it here after the reset", .continueHere),
+        ("Move it to another account with room", .move),
+        ("Leave it", .leave),
+    ]
+
     private let statusLabel = NSTextField(labelWithString: "")
 
     private let refreshOptions: [(title: String, seconds: Int)] = [
@@ -136,11 +164,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if table.selectedRow >= 0 { navigate(to: 2) }
     }
 
+    /// Pages, in tab order: General, Menu bar, Account, Continue after limits.
+    private static let continuePageIndex = 3
+
     private func navigate(to index: Int) {
         pages.selectTabViewItem(at: index)
         generalNavigation.state = index == 0 ? .on : .off
         menuBarNavigation.state = index == 1 ? .on : .off
-        for button in [generalNavigation, menuBarNavigation] {
+        continueNavigation.state = index == Self.continuePageIndex ? .on : .off
+        if index == Self.continuePageIndex { rebuildReadiness() }
+        for button in [generalNavigation, menuBarNavigation, continueNavigation] {
             button.contentTintColor = button.state == .on ? .controlAccentColor : .labelColor
         }
         if index != 2 { table.deselectAll(nil) }
@@ -149,6 +182,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     @objc private func showGeneral() { navigate(to: 0) }
     @objc private func showMenuBar() { navigate(to: 1) }
+    @objc private func showContinue() { navigate(to: Self.continuePageIndex) }
+
+    /// Opens a page by its name, as the menu's gear does ("continue").
+    func select(sectionNamed name: String) {
+        switch name {
+        case "continue", "keepGoing": navigate(to: Self.continuePageIndex)
+        case "menuBar": navigate(to: 1)
+        default: navigate(to: 0)
+        }
+    }
     @objc private func accountSectionChanged() {
         accountSections.selectTabViewItem(at: max(0, accountPicker.selectedSegment))
         resizeAccountSection()
@@ -167,6 +210,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         config.menuBarProfileIDs = newConfig.menuBarProfileIDs
         config.menuBarProfileID = newConfig.menuBarProfileID
         config.showPercentInMenuBar = newConfig.showPercentInMenuBar
+        config.keepWorkGoing = newConfig.keepWorkGoing
+        keepGoing.state = config.keepsWorkGoing ? .on : .off
+        config.answerWhenAway = newConfig.answerWhenAway
+        answerAway.state = config.answersWhenAway ? .on : .off
         let index = pages.indexOfTabViewItem(pages.selectedTabViewItem!)
         let id = selectedID
         table.reloadData()
@@ -196,7 +243,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         sidebar.blendingMode = .behindWindow
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(sidebar)
-        for (button, selector) in [(generalNavigation, #selector(showGeneral)), (menuBarNavigation, #selector(showMenuBar))] {
+        for (button, selector) in [(generalNavigation, #selector(showGeneral)), (menuBarNavigation, #selector(showMenuBar)), (continueNavigation, #selector(showContinue))] {
             button.target = self; button.action = selector
             button.setButtonType(.toggle)
             button.bezelStyle = .recessed
@@ -217,17 +264,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let rescan = NSButton(title: "Rescan", target: self, action: #selector(rescanAccounts))
         for button in [add, rescan] { button.bezelStyle = .rounded; button.controlSize = .small }
         let footer = NSStackView(views: [add, rescan]); footer.spacing = 6
-        let navigation = NSStackView(views: [generalNavigation, menuBarNavigation, caption, scroll, footer])
+        let navigation = NSStackView(views: [generalNavigation, menuBarNavigation, continueNavigation, caption, scroll, footer])
         navigation.orientation = .vertical; navigation.alignment = .leading; navigation.spacing = 6
-        navigation.setCustomSpacing(22, after: menuBarNavigation)
+        navigation.setCustomSpacing(22, after: continueNavigation)
         navigation.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(navigation)
-        for view in [generalNavigation, menuBarNavigation, scroll] {
+        for view in [generalNavigation, menuBarNavigation, continueNavigation, scroll] {
             view.widthAnchor.constraint(equalTo: navigation.widthAnchor).isActive = true
         }
         pages.tabViewType = .noTabsNoBorder
         pages.translatesAutoresizingMaskIntoConstraints = false
-        for (title, page) in [("General", generalPage), ("Menu bar", menuBarPage), ("Account", accountPage)] {
+        for (title, page) in [("General", generalPage), ("Menu bar", menuBarPage), ("Account", accountPage), ("Continue after limits", continuePage)] {
             configure(page)
             let item = NSTabViewItem(identifier: title); item.label = title
             let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false
@@ -245,6 +292,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         buildGeneralSection(into: generalPage)
         buildMenuBarSection(into: menuBarPage)
         buildAccountSection(into: accountPage)
+        buildContinueSection(into: continuePage)
         statusLabel.textColor = .secondaryLabelColor; statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -283,7 +331,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func preference(_ title: String, control: NSView, into form: NSStackView, id: String? = nil) {
         if let id { control.identifier = NSUserInterfaceItemIdentifier(id) }
         if let button = control as? NSButton,
-           [menuBarAccount, autoStartSession, showIconLabels, showWeekly, showLabels, showSession, showWeeklyLimits, showResets, showManualResets, launchAtLogin, showSparklines, autoApproveCookies, autoUpdate, routeClaudeLinks, offerClaudeUpdates].contains(where: { $0 === button }) {
+           [menuBarAccount, autoStartSession, showIconLabels, showWeekly, showLabels, showSession, showWeeklyLimits, showResets, showManualResets, launchAtLogin, showSparklines, autoApproveCookies, autoUpdate, routeClaudeLinks, offerClaudeUpdates, notifyOnReset, keepGoing, answerAway, answerTextQuestions].contains(where: { $0 === button }) {
             button.title = ""; button.setAccessibilityLabel(title)
         }
         let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 12)
@@ -511,11 +559,213 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         offerClaudeUpdates.state = config.offersClaudeUpdates ? .on : .off; offerClaudeUpdates.target = self; offerClaudeUpdates.action = #selector(offerClaudeUpdatesChanged)
         preference("Handle Claude updates", control: offerClaudeUpdates, into: form)
         section("Notifications", into: form)
+        notifyPopup.addItems(withTitles: notifyOptions.map(\.title))
+        notifyPopup.selectItem(at: notifyOptions.firstIndex { $0.percent == config.notificationThreshold } ?? 3)
+        notifyPopup.target = self; notifyPopup.action = #selector(notificationsChanged)
+        notifyPopup.toolTip = "And again when it's used up, with a choice of what happens to a session running there."
+        preference("Notify when a limit reaches", control: notifyPopup, into: form)
+        notifyOnReset.state = config.notifiesOnLimitReset ? .on : .off
+        notifyOnReset.target = self; notifyOnReset.action = #selector(notificationsChanged)
+        preference("Notify when a used-up limit resets", control: notifyOnReset, into: form)
         let settings = NSButton(title: "System settings…", target: self, action: #selector(openNotificationSettings)); settings.bezelStyle = .rounded
         preference("macOS permission", control: settings, into: form)
         notificationStatus.font = .systemFont(ofSize: 11); notificationStatus.textColor = .secondaryLabelColor
         form.addArrangedSubview(notificationStatus)
-        form.addArrangedSubview(helpLabel("Configure manual-reset expiry notifications on each account's Display page."))
+        form.addArrangedSubview(helpLabel("For every account's 5h and weekly limits. Manual-reset expiry notifications are set on each account's Display page."))
+    }
+
+    @objc private func notificationsChanged() {
+        let percent = notifyOptions[max(0, notifyPopup.indexOfSelectedItem)].percent
+        let onReset = notifyOnReset.state == .on
+        commit {
+            $0.notifyAtPercent = percent
+            $0.notifyOnLimitReset = onReset
+        }
+        if percent > 0 || onReset {
+            UsageNotifier.shared.requestPermissionIfNeeded()
+        }
+    }
+
+    // MARK: Continue after limits
+
+    private func buildContinueSection(into form: NSStackView) {
+        heading("Continue after limits", subtitle: "What happens to a Claude Code session when it reaches a usage limit. Each session can have its own plan: open the list next to “Continue after limits” in the menu and click a session.", into: form)
+        keepGoing.state = config.keepsWorkGoing ? .on : .off
+        keepGoing.target = self; keepGoing.action = #selector(keepGoingChanged)
+        preference("Continue sessions after a limit", control: keepGoing, into: form, id: "keepGoing")
+        form.addArrangedSubview(helpLabel("Covers limits reached from the moment it's on. The message is typed in the session's own Claude window, where you can watch it and stop it. Nothing runs in the background."))
+        continuePlanPopup.addItems(withTitles: continuePlans.map(\.title))
+        continuePlanPopup.selectItem(at: continuePlans.firstIndex { $0.plan == config.continuePlan } ?? 0)
+        continuePlanPopup.target = self; continuePlanPopup.action = #selector(continueDefaultsChanged)
+        preference("When a session reaches its limit", control: continuePlanPopup, into: form, id: "continuePlan")
+        continueMessageField.stringValue = config.continueMessage
+        continueMessageField.placeholderString = "continue"
+        continueMessageField.target = self; continueMessageField.action = #selector(continueDefaultsChanged)
+        continueMessageField.cell?.sendsActionOnEndEditing = true
+        continueMessageField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        preference("Message it sends", control: continueMessageField, into: form, id: "continueMessage")
+
+        section("Order for moving", into: form)
+        ringStack.orientation = .vertical; ringStack.alignment = .leading; ringStack.spacing = 4
+        rebuildRing()
+        form.addArrangedSubview(ringStack); form.setCustomSpacing(6, after: ringStack)
+        form.addArrangedSubview(helpLabel("A session moves to the first account after its own, in this order, that has room. The order wraps. A ChatGPT account can be picked for one session in the menu: the session is moved there and opened, and you send the message."))
+
+        section("Ready to send", into: form)
+        readinessStack.orientation = .vertical; readinessStack.alignment = .leading; readinessStack.spacing = 4
+        rebuildReadiness()
+        form.addArrangedSubview(readinessStack); form.setCustomSpacing(6, after: readinessStack)
+        form.addArrangedSubview(helpLabel("ChatGPT sessions aren't continued: there's no ChatGPT window LLMCodeBar can type into. You get a notification when one can carry on."))
+
+        section("When a session asks you", into: form)
+        form.addArrangedSubview(helpLabel("Covers a question card, and a question in the next-step box at the end of a turn. Never a permission request or a plan approval: those always wait for you."))
+        answerAway.state = config.answersWhenAway ? .on : .off
+        answerTextQuestions.state = config.answersTextQuestions ? .on : .off
+        for button in [answerAway, answerTextQuestions] { button.target = self; button.action = #selector(answeringChanged) }
+        preference("Answer for me when I'm away", control: answerAway, into: form, id: "answerAway")
+        awayPopup.addItems(withTitles: awayOptions.map { "\($0) min without keyboard or mouse" })
+        awayPopup.selectItem(at: awayOptions.firstIndex(of: config.awayAfter) ?? 1)
+        answerPopup.addItems(withTitles: KeepGoing.Answer.allCases.map(\.title))
+        answerPopup.selectItem(at: KeepGoing.Answer.allCases.firstIndex(of: config.defaultAnswer) ?? 0)
+        for popup in [awayPopup, answerPopup] { popup.target = self; popup.action = #selector(answeringChanged) }
+        awayPopup.toolTip = "A locked screen counts as away too."
+        preference("Away means", control: awayPopup, into: form, id: "awayMinutes")
+        preference("Answer", control: answerPopup, into: form, id: "awayAnswer")
+        for (title, field, answer) in [("“Decide for me” says", decideField, KeepGoing.Answer.decide), ("“Do what you can without it” says", aroundField, .around)] {
+            // The whole message is shown, default or not, so it can be read and edited.
+            field.stringValue = config.answerMessage(answer)
+            field.target = self; field.action = #selector(answeringChanged)
+            field.cell?.sendsActionOnEndEditing = true
+            field.cell?.wraps = true
+            field.cell?.isScrollable = false
+            field.usesSingleLineMode = false
+            field.lineBreakMode = .byWordWrapping
+            field.font = .systemFont(ofSize: 12)
+            field.heightAnchor.constraint(equalToConstant: 38).isActive = true
+            field.toolTip = "Empty it to go back to the default."
+            let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 12)
+            let block = NSStackView(views: [label, field])
+            block.orientation = .vertical; block.alignment = .leading; block.spacing = 4
+            block.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+            form.addArrangedSubview(block)
+            block.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+            field.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        }
+        preference("Also answer turns that just end on a “?”", control: answerTextQuestions, into: form, id: "answerTextQuestions")
+        form.addArrangedSubview(helpLabel("Off by default: “Want me to also add tests?” is more an offer than a question. A session gets at most \(KeepGoing.maxAnswers) answers an hour; after that it waits for you."))
+    }
+
+    @objc private func keepGoingChanged() {
+        let on = keepGoing.state == .on
+        commit { $0.keepWorkGoing = on }
+        if on { ClaudeWindowMessenger.requestAccessIfNeeded() }
+        KeepGoing.shared.setEnabled(on, config: config)
+        rebuildReadiness()
+    }
+
+    @objc private func continueDefaultsChanged() {
+        let plan = continuePlans[max(0, continuePlanPopup.indexOfSelectedItem)].plan
+        let message = continueMessageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        commit {
+            $0.keepGoingPlan = plan.rawValue
+            $0.keepGoingMessage = message.isEmpty || message == "continue" ? nil : message
+        }
+    }
+
+    @objc private func answeringChanged() {
+        let on = answerAway.state == .on
+        let texts = answerTextQuestions.state == .on
+        let minutes = awayOptions[max(0, awayPopup.indexOfSelectedItem)]
+        let answer = KeepGoing.Answer.allCases[max(0, answerPopup.indexOfSelectedItem)]
+        let decide = decideField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let around = aroundField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let turnedOn = on && !config.answersWhenAway
+        commit {
+            $0.answerWhenAway = on
+            $0.answerTextQuestions = texts ? true : nil
+            $0.awayMinutes = minutes == 10 ? nil : minutes
+            $0.awayAnswer = answer == .decide ? nil : answer.rawValue
+            $0.decideMessage = decide.isEmpty || decide == KeepGoing.Answer.decideMessage ? nil : decide
+            $0.aroundMessage = around.isEmpty || around == KeepGoing.Answer.aroundMessage ? nil : around
+        }
+        if turnedOn { ClaudeWindowMessenger.requestAccessIfNeeded() }
+    }
+
+    /// One row per Claude account in ring order, with buttons to move it up or down.
+    private func rebuildRing() {
+        ringStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let ring = config.relayRing.filter { $0.provider == .claude && $0.isPendingLogin != true }
+        for (index, profile) in ring.enumerated() {
+            let label = NSTextField(labelWithString: "\(index + 1).  \(ProfileFormatting.title(for: profile))")
+            label.font = .systemFont(ofSize: 12)
+            label.lineBreakMode = .byTruncatingMiddle
+            label.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            let up = NSButton(title: "▲", target: self, action: #selector(moveRingAccount(_:)))
+            let down = NSButton(title: "▼", target: self, action: #selector(moveRingAccount(_:)))
+            for (button, step) in [(up, -1), (down, 1)] {
+                button.bezelStyle = .rounded
+                button.controlSize = .mini
+                button.tag = index * 10 + (step < 0 ? 0 : 1)
+                button.isEnabled = step < 0 ? index > 0 : index < ring.count - 1
+                button.setAccessibilityLabel(step < 0 ? "Move \(ProfileFormatting.title(for: profile)) up" : "Move \(ProfileFormatting.title(for: profile)) down")
+            }
+            let row = NSStackView(views: [label, up, down])
+            row.orientation = .horizontal
+            row.spacing = 4
+            ringStack.addArrangedSubview(row)
+        }
+        if ring.isEmpty {
+            let none = NSTextField(labelWithString: "No signed-in Claude accounts yet.")
+            none.font = .systemFont(ofSize: 12); none.textColor = .secondaryLabelColor
+            ringStack.addArrangedSubview(none)
+        }
+    }
+
+    @objc private func moveRingAccount(_ sender: NSButton) {
+        var ids = config.relayRing.filter { $0.provider == .claude && $0.isPendingLogin != true }.map(\.id)
+        let index = sender.tag / 10
+        let target = sender.tag % 10 == 0 ? index - 1 : index + 1
+        guard ids.indices.contains(index), ids.indices.contains(target) else { return }
+        ids.swapAt(index, target)
+        commit { $0.relayOrder = ids }
+        rebuildRing()
+    }
+
+    /// Whether LLMCodeBar can type into Claude's windows, and which are open.
+    private func rebuildReadiness() {
+        readinessStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let trusted = AXIsProcessTrusted()
+        let access = NSTextField(labelWithString: trusted ? "✓  Accessibility is allowed" : "✕  Accessibility isn't allowed, so nothing can be sent")
+        access.font = .systemFont(ofSize: 12)
+        access.textColor = trusted ? .labelColor : .systemRed
+        if trusted {
+            readinessStack.addArrangedSubview(access)
+        } else {
+            let open = NSButton(title: "Open Accessibility Settings", target: self, action: #selector(openAccessibilitySettings))
+            open.bezelStyle = .rounded
+            open.controlSize = .small
+            let row = NSStackView(views: [access, open])
+            row.orientation = .horizontal
+            row.spacing = 8
+            readinessStack.addArrangedSubview(row)
+        }
+        let running = RunningProfileDetector.runningProfileIDs(config.profiles)
+        for profile in config.profiles where profile.provider == .claude && profile.isPendingLogin != true {
+            let open = running.contains(profile.id)
+            let line = NSTextField(labelWithString: open
+                ? "✓  \(ProfileFormatting.title(for: profile))'s Claude window is open"
+                : "–  \(ProfileFormatting.title(for: profile))'s Claude window is closed; it's opened when needed")
+            line.font = .systemFont(ofSize: 12)
+            line.textColor = open ? .labelColor : .secondaryLabelColor
+            readinessStack.addArrangedSubview(line)
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        ClaudeWindowMessenger.requestAccessIfNeeded()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     @objc private func openNotificationSettings() {
@@ -530,7 +780,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
                 switch settings.authorizationStatus {
                 case .authorized, .provisional, .ephemeral: text = "Notifications allowed by macOS."
                 case .denied: text = "Enable LLMCodeBar in System Settings → Notifications."
-                default: text = "Permission is requested when you enable an expiry notification."
+                default: text = "Permission is requested when you turn on a notification."
                 }
                 self?.notificationStatus.stringValue = text
                 self?.accountNotificationStatus.stringValue = text

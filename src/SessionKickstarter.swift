@@ -11,22 +11,81 @@ import Foundation
 /// - It consumes a negligible amount of quota by design - that's what starts the window.
 enum SessionKickstarter {
     private static let queue = DispatchQueue(label: "fr.fraserv.llmusagebar.session-kick")
-    private static var lastKick: [String: Date] = [:]
-
-    /// Never fire more than once per this interval per account (in-memory guard).
+    /// Never fire more than once per this interval per account.
     private static let minInterval: TimeInterval = 30 * 60
+    /// The window a start opens. ChatGPT's usage can't be trusted to show that one is
+    /// running (a "hi" leaves it at 0%), so after starting a ChatGPT window nothing is
+    /// started again until it has had time to end.
+    private static let windowLength: TimeInterval = 5 * 3600
+    private static let kicksKey = "sessionKicks"
 
-    /// Claude models to try, cheapest first. `nil` = the account default. Retired
-    /// slugs return `model_not_available`, so we fall through until one is accepted.
-    private static let claudeModels: [String?] = [
+    /// When each account's window was last started, kept on disk so a restart of
+    /// LLMCodeBar doesn't start another one.
+    private static var lastKick: [String: Date] {
+        get {
+            let stored = UserDefaults.standard.dictionary(forKey: kicksKey) as? [String: Double] ?? [:]
+            return stored.mapValues { Date(timeIntervalSince1970: $0) }
+        }
+        set {
+            let recent = newValue.filter { Date().timeIntervalSince($0.value) < 24 * 3600 }
+            UserDefaults.standard.set(recent.mapValues(\.timeIntervalSince1970), forKey: kicksKey)
+        }
+    }
+
+    /// Used only when the account's own model list can't be read. Retired slugs return
+    /// `model_not_available`, so we fall through until one is accepted; `nil` = the
+    /// account default.
+    private static let claudeFallbackModels: [String?] = [
         "claude-haiku-4-5-20251001",
-        "claude-haiku-4-5",
         nil,
     ]
-
-    /// Fallback ChatGPT models if the account's configured model can't be read. ChatGPT
-    /// accounts only accept their provisioned model, so `config.toml` is the real source.
     private static let codexModelFallbacks = ["gpt-5.1-codex", "gpt-5-codex", "gpt-5"]
+
+    /// How expensive a model family is, cheapest first. Anything unknown sorts last, so a
+    /// new family never gets picked over a known cheap one.
+    private static let claudeFamilies = ["haiku", "sonnet", "opus", "fable"]
+    private static let codexTiers: [[String]] = [
+        ["affordable", "efficient", "luna", "mini", "nano"],
+        ["balanced", "terra"],
+        ["workhorse", "sol"],
+        ["frontier", "astra"],
+    ]
+
+    /// The account's own Claude models, cheapest first, from the same list claude.ai
+    /// builds its model picker from. Retired ones (`inactive`) are skipped, and within a
+    /// family the list's own order (newest first) is kept.
+    static func cheapestClaudeModels(headers: [String: String]) -> [String] {
+        guard let response = try? SimpleHTTP.get(URL(string: "https://claude.ai/api/bootstrap")!, headers: headers, timeout: 15),
+              response.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let memberships = (json["account"] as? [String: Any])?["memberships"] as? [[String: Any]] else {
+            return []
+        }
+        let entries = memberships
+            .compactMap { ($0["organization"] as? [String: Any])?["claude_ai_bootstrap_models_config"] as? [[String: Any]] }
+            .first { !$0.isEmpty } ?? []
+        let models = entries.enumerated().compactMap { index, entry -> (rank: Int, index: Int, model: String)? in
+            guard let model = entry["model"] as? String, entry["inactive"] as? Bool != true else { return nil }
+            let family = claudeFamilies.firstIndex { model.contains($0) } ?? claudeFamilies.count
+            // "More models" entries are older ones; prefer the main picker's.
+            let overflow = entry["overflow"] as? Bool == true ? 1 : 0
+            return (family * 2 + overflow, index, model)
+        }
+        return models.sorted { ($0.rank, $0.index) < ($1.rank, $1.index) }.map(\.model)
+    }
+
+    /// The ChatGPT account's Codex models, cheapest first, judged from their names and
+    /// descriptions (the list carries no prices).
+    static func cheapestCodexModels(for profile: LaunchProfile) -> [String] {
+        let models = CodexSessionTransfer.availableModels(for: profile)
+        let ranked = models.enumerated().compactMap { index, entry -> (rank: Int, index: Int, model: String)? in
+            guard let model = (entry["model"] as? String) ?? (entry["id"] as? String), entry["hidden"] as? Bool != true else { return nil }
+            let text = "\(model) \(entry["displayName"] as? String ?? "") \(entry["description"] as? String ?? "")".lowercased()
+            let tier = codexTiers.firstIndex { words in words.contains { text.contains($0) } } ?? codexTiers.count
+            return (tier, index, model)
+        }
+        return ranked.sorted { ($0.rank, $0.index) < ($1.rank, $1.index) }.map(\.model)
+    }
 
     // MARK: Auto (timer-driven)
 
@@ -39,8 +98,13 @@ enum SessionKickstarter {
             for profile in candidates {
                 guard shouldKick(profile) else { continue }
                 lastKick[profile.id] = Date()
-                if startSession(for: profile, allowKeychain: allowKeychain).hasPrefix("Started") {
+                let outcome = startSession(for: profile, allowKeychain: allowKeychain)
+                let source = "Auto-start · \(ProfileFormatting.title(for: profile))"
+                if outcome.hasPrefix("Started") {
                     started = true
+                    ActivityLog.shared.info(source, outcome)
+                } else {
+                    ActivityLog.shared.error(source, outcome)
                 }
             }
             if started { onSessionStarted?() }
@@ -72,11 +136,17 @@ enum SessionKickstarter {
         }
     }
 
-    private static func shouldKick(_ profile: LaunchProfile) -> Bool {
-        if let last = lastKick[profile.id], Date().timeIntervalSince(last) < minInterval {
-            return false
+    static func shouldKick(_ profile: LaunchProfile, lastKick last: Date?, now: Date = Date()) -> Bool {
+        if let last {
+            let since = now.timeIntervalSince(last)
+            if since < minInterval { return false }
+            if profile.provider == .codex, since < windowLength { return false }
         }
         return isSessionIdle(profile)
+    }
+
+    private static func shouldKick(_ profile: LaunchProfile) -> Bool {
+        shouldKick(profile, lastKick: lastKick[profile.id])
     }
 
     // MARK: Manual / shared
@@ -118,9 +188,12 @@ enum SessionKickstarter {
             var completionHeaders = headers
             completionHeaders["Accept"] = "text/event-stream"
 
+            let cheapest = cheapestClaudeModels(headers: headers)
+            let candidates: [String?] = cheapest.isEmpty ? claudeFallbackModels : cheapest.prefix(3).map { $0 } + [nil]
+
             var lastStatus = 0
             var lastError = ""
-            for model in claudeModels {
+            for model in candidates {
                 var body: [String: Any] = [
                     "prompt": "hi",
                     "parent_message_uuid": "00000000-0000-4000-8000-000000000000",
@@ -163,10 +236,13 @@ enum SessionKickstarter {
             var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
             // Try the account's own configured model first; the ChatGPT backend rejects
             // any model it wasn't provisioned for.
-            var models = codexModelFallbacks
-            if let configured = CodexAuthStore.configuredModel(dataDir: profile.dataDir) {
-                models = [configured] + models.filter { $0 != configured }
+            // The cheapest model the account offers, then the one it's set to use (which
+            // it's certainly provisioned for), then names that used to work.
+            var models = Array(cheapestCodexModels(for: profile).prefix(3))
+            if let configured = CodexAuthStore.configuredModel(dataDir: profile.dataDir), !models.contains(configured) {
+                models.append(configured)
             }
+            models += codexModelFallbacks.filter { !models.contains($0) }
             var lastStatus = 0
             var lastError = ""
             for model in models {

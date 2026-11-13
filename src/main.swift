@@ -1,5 +1,35 @@
 import AppKit
 
+// Checks LLMCodeBar can reach a Claude window's reply box: --probe-claude-window <pid>
+// [--send <claude:// link> <text>] --out <file>. Started with `open -n` so macOS applies
+// LLMCodeBar's own Accessibility permission.
+if let index = CommandLine.arguments.firstIndex(of: "--probe-claude-window"),
+   let pid = CommandLine.arguments.dropFirst(index + 1).first.flatMap({ pid_t($0) }) {
+    let arguments = CommandLine.arguments
+    var report = ClaudeWindowMessenger.probe(pid: pid)
+    if let send = arguments.firstIndex(of: "--send"), arguments.count > send + 2,
+       let link = URL(string: arguments[send + 1]), let app = NSRunningApplication(processIdentifier: pid) {
+        var polls = 0
+        let result = ClaudeWindowMessenger.send(arguments[send + 2], opening: link, in: app) {
+            polls += 1
+            return polls >= 2
+        }
+        report += "\nSend: \(result)"
+    }
+    if let out = arguments.firstIndex(of: "--out"), arguments.count > out + 1 {
+        try? report.write(toFile: arguments[out + 1], atomically: true, encoding: .utf8)
+    } else {
+        print(report)
+    }
+    exit(0)
+}
+
+// Prints what "Continue after limits" sees and would do now. Reads only.
+if CommandLine.arguments.contains("--continue-dry-run") {
+    print(KeepGoing.shared.dryRun(config: ConfigStore.shared.loadCached()))
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--dump-inferred-json") {
     let config = ConfigStore.shared.load()
     let encoder = JSONEncoder()

@@ -645,10 +645,12 @@ final class QuotaWindowView: NSView {
         }.max() ?? 0)
     }
 
-    /// Green until 90%, amber from there, red once it's used up.
+    /// Amber from the notification threshold (90% by default), red once it's used up.
+    static var warnAt: Double = 90
+
     static func color(for usedPercent: Double) -> NSColor {
         if usedPercent >= 99.5 { return .systemRed }
-        if usedPercent >= 90 { return .systemOrange }
+        if usedPercent >= min(warnAt, 95) { return .systemOrange }
         return .systemGreen
     }
 
@@ -701,6 +703,13 @@ final class ProfileMenuItemView: NSView {
     /// The card's menu-bar pin, when it has one - the menu unpins other cards in place
     /// when a third account bumps one out of the menu bar.
     private(set) var menuBarPin: MenuBarPinView?
+
+    /// Folded, a card is its header line alone, with two mini bars for its limits.
+    static let foldedHeight: CGFloat = 30
+    /// How far the card moves up when folded, so its header sits in the middle.
+    static let foldedShift: CGFloat = 5
+    private var foldAway: [NSView] = []
+    private var miniBars: MiniBarsView?
 
     init(profile: LaunchProfile, target: AnyObject, action: Selector, isRefreshing: Bool, isRunning: Bool, showSparklines: Bool = false, warning: String? = nil, inMenuBar: Bool? = nil, onMenuBarToggle: ((String, Bool) -> Void)? = nil) {
         self.profileID = profile.id
@@ -814,7 +823,18 @@ final class ProfileMenuItemView: NSView {
         if resets != nil, let last = rows.last { body.setCustomSpacing(5, after: last) }
 
         for view in [icon, name, plan, trailingStack, body] as [NSView] { addSubview(view) }
+        foldAway = [body]
+        let primary = (profile.usage?.windows ?? []).filter(\.isPrimary)
+        let mini = MiniBarsView(windows: primary)
+        mini.alphaValue = 0
+        mini.toolTip = primary.map { "\(ProfileFormatting.windowTitle($0.title)): \(ProfileFormatting.usedText(for: $0))" }.joined(separator: "\n")
+        addSubview(mini)
+        miniBars = mini
         var constraints: [NSLayoutConstraint] = [
+            mini.trailingAnchor.constraint(equalTo: trailingStack.leadingAnchor, constant: -8),
+            mini.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            mini.leadingAnchor.constraint(greaterThanOrEqualTo: plan.trailingAnchor, constant: 6),
+
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             icon.topAnchor.constraint(equalTo: topAnchor, constant: 11),
             icon.widthAnchor.constraint(equalToConstant: 18),
@@ -846,6 +866,7 @@ final class ProfileMenuItemView: NSView {
                 alertLabel.toolTip = "Couldn't update: \(error)"
             }
             addSubview(alertLabel)
+            foldAway.append(alertLabel)
             constraints += [
                 alertLabel.leadingAnchor.constraint(equalTo: name.leadingAnchor),
                 alertLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
@@ -854,6 +875,17 @@ final class ProfileMenuItemView: NSView {
             ]
         }
         NSLayoutConstraint.activate(constraints)
+    }
+
+    /// 0 is the whole card, 1 its header line alone: the limit lines fade out as the
+    /// mini bars fade in beside the name.
+    func applyFold(_ progress: CGFloat) {
+        let away = max(0, 1 - progress * 1.8)
+        for view in foldAway { view.alphaValue = away }
+        miniBars?.alphaValue = min(1, max(0, (progress - 0.3) / 0.7))
+        // Only opacity changes per frame: those are layer properties, so nothing is laid
+        // out or drawn again while the cards fold.
+        if isHovering { needsDisplay = true }
     }
 
     override func updateTrackingAreas() {
@@ -882,6 +914,7 @@ final class ProfileMenuItemView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         performOpen(self)
+        keepRestOfClick(event)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1049,6 +1082,7 @@ final class MenuBarPinView: NSView {
     override func mouseDown(with event: NSEvent) {
         setOn(!isOn, animated: true)
         onToggle?(isOn)
+        keepRestOfClick(event)
     }
 
     override func accessibilityPerformPress() -> Bool {

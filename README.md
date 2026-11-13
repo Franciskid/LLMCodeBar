@@ -18,12 +18,14 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 ## Everything else
 
-- Session (5h) and Weekly bars for every account, with reset times.
+- Session (5h) and Weekly bars for every account, with reset times, grouped under a Claude and a ChatGPT heading.
+- Notifications when a limit passes the percentage you pick (90% by default), when it's used up, and when a used-up limit resets.
+- An Activity Log in the menu with everything that happened in the background: refresh errors, auto-started sessions, sessions continued after a limit, transfers, updates. The menu tells you when there's a new problem, and **Copy All** gives you a report to paste into an issue.
 - A 7 day trend line per limit that goes green to red as you get close.
 - Put accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Click the pin next to any account in the dropdown to put it there or take it off, no need to open Settings. Settings > Menu bar sets the layout, from one account up to a 3 by 3 grid of nine, and can put a short label on each icon (the first 2 characters of the email unless you type your own) to tell two accounts of the same app apart. Pin one more than fits and the oldest one steps aside. When the accounts sit on one row there's room for more: the weekly % and how long until each limit resets (3d, 4h, 7m), stacked 5h above weekly or side by side, each part can be turned off.
 
   <img src="assets/menubar.png" alt="Two accounts' 5h usage in the menu bar" width="72">
-- Each account says whether auto start is on for it, next to its plan. Click anywhere else on an account to open its app.
+- A bolt next to an account means auto start is on for it. Auto start picks the cheapest model the account offers each time, from the account's own model list, so it keeps working as models are retired. Click anywhere else on an account to open its app.
 - Refresh from every 30 seconds to every 30 minutes.
 - Keeps your Code history where you can find it. Claude files each Code session under the window it was created in, so when a re-login puts an account in your *other* Claude window, its whole history looks gone - it isn't, that window just has an empty folder for it. LLMCodeBar keeps every account's sessions present in every window, and offers to restart a window that has to reload them. It never overwrites a session the running app owns, and a session you delete stays deleted.
 - Signs you in to the window you asked. With two Claude windows open, macOS hands a browser sign-in back to whichever one it likes, and the other one rejects it. LLMCodeBar holds the `claude://` link type, which makes Claude sign in inside its own window instead of sending you to the browser. Turn it off in Settings to hand the links back.
@@ -61,6 +63,32 @@ Each kind travels differently, because each one is stored somewhere very differe
 
 ![Copying a Codex thread into Claude Code](assets/transfer-codex.png)
 
+## Keeping work going past a limit
+
+Tick **Continue after limits** in the menu (or in Settings > Continue after limits) and a Claude Code session that reaches a usage limit carries on by itself. The chevron next to the checkbox opens the list of your sessions from the last 3 hours, right in the menu: what each one is doing (working, idle, waiting for reset, moving, sending, needs you) and what happens at its limit.
+
+What happens is up to you, per session or for all of them (the gear opens the defaults):
+
+- **Continue here**: wait for the account's reset, then send the message in the same window. LLMCodeBar wakes at the reset time itself.
+- **Move to another account**: hand the session to the account you pick, or the next one in your order that has room, and send the message there straight away. When every account is full, it continues on whichever one is back first.
+- **Leave it**.
+
+The message is "continue" unless you change it, for one session or for all. Click a session in the list to change its plan, the account it moves to, or its message; the line under it says "default" or "custom", and "Use defaults" puts it back.
+
+It happens in the Claude window, where you can watch the turn and stop it. Nothing ever runs in the background. LLMCodeBar fills the session's reply box and presses Send through macOS Accessibility, so it needs that permission, and it never types into the app you're using. When the window can't take the message (an unsent draft, the window won't open), the session shows "needs you", a notification says why, and nothing is sent until you try again. Turning it on only covers limits reached from then on; one already reached shows "Continue now". Moving pauses after 8 moves in 12 hours, in case something loops.
+
+### When a session asks you something
+
+A session can also stop because it's waiting on you: a question card, a plan to approve, or a question at the end of its turn. Those show at the top of the same list, with the question word for word, as **asking you**. Tick **Answer for me when I'm away** and, once you've had no keyboard or mouse for 10 minutes (or the screen is locked), LLMCodeBar answers in the session's window:
+
+- **Decide for me**: it goes with what it would recommend, and leaves anything that can't be undone for you.
+- **Do what you can without it**: it leaves the question for you and carries on with the rest.
+- **Wait for me**: nothing is sent, you get a notification.
+
+Pick one per session in the list, or for all of them in Settings, where both messages can be changed. While you're at the Mac you only get a notification, with the same two answers on it. Plan approvals and permission requests are never answered for you. A turn that only ends on a "?" is shown but not answered unless you tick it in Settings, since it's often an offer more than a question. A session gets at most 3 answers an hour.
+
+ChatGPT accounts can be picked as the place to move one session to. LLMCodeBar imports the session into ChatGPT and opens it there, but you send the message, since it doesn't type into ChatGPT. For the same reason it never picks ChatGPT on its own, and ChatGPT sessions aren't continued automatically; you get a notification when one can carry on.
+
 ## Install
 
 Download **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
@@ -77,7 +105,7 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 ## Settings
 
-Settings uses a sidebar: **General** for startup, refresh, updates, cookie access, Claude integration, and macOS notification permission; **Menu bar** for grid size, fill order, icon labels, weekly percentage, quota countdowns, arrangement, and preview. Select an account to open its **Display**, **Sessions**, and **Advanced** sections. Existing preferences, pinned accounts, and custom icon labels are preserved.
+Settings uses a sidebar: **General** for startup, refresh, updates, cookie access, Claude integration, limit notifications and macOS notification permission; **Menu bar** for grid size, fill order, icon labels, weekly percentage, quota countdowns, arrangement, and preview. **Continue after limits** for what happens to a session at its limit, the message it sends, the order accounts take over in, and answering while you're away. Select an account to open its **Display**, **Sessions**, and **Advanced** sections. Existing preferences, pinned accounts, and custom icon labels are preserved.
 
 The dropdown groups accounts under a Claude and a ChatGPT heading. Each account is a header line (name, plan, auto-start, open or closed, menu bar pin) and one line per limit: bar, percent used and reset time, or when it's back once it's used up. Each account controls its own bars, trendlines, labels, automatic reset times, and manual-reset visibility. Manual resets sit on one line under the limits with a count and short dates, such as `Fable ×1 17 Nov` or `Full ×3 30 Nov · 1 Dec · 12 Dec`. Current-year dates omit the year; no hour or “expires” prefix is shown.
 

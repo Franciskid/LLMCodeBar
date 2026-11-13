@@ -26,6 +26,9 @@ struct UsageWindow: Codable {
     var remainingPercent: Double
     var resetsAt: Date?
 
+    /// The 5h and weekly limits.
+    var isPrimary: Bool { title == "5h" || title == "Week" }
+
     var displayText: String {
         let remaining = Int(remainingPercent.rounded())
         if let resetsAt {
@@ -377,6 +380,48 @@ struct AppConfig: Codable {
     /// are open (see ClaudeUpdateCoordinator): put back a window Claude closes for one,
     /// and offer to finish it. Defaults to on. Closing a window is always the user's click.
     var offerClaudeUpdates: Bool?
+
+    /// Notify when a 5h or weekly limit passes this percentage (and again at 100%).
+    /// 0 turns those notifications off. Defaults to 90.
+    var notifyAtPercent: Int?
+    /// Notify when a limit that was used up has reset. Defaults to on.
+    var notifyOnLimitReset: Bool?
+    /// "Continue after limits": sessions that reach a limit are continued as planned
+    /// (see KeepGoing). Defaults to off.
+    var keepWorkGoing: Bool?
+    /// The ring's order, as profile ids. Accounts missing from it follow in their usual
+    /// order, so a new account joins at the end.
+    var relayOrder: [String]?
+    /// What happens to a session at its limit unless it has its own plan
+    /// (`KeepGoing.Plan` raw value). Defaults to continuing it after the reset.
+    var keepGoingPlan: String?
+    /// The message that continues a session. Defaults to "continue".
+    var keepGoingMessage: String?
+    /// "Answer for me when I'm away": a session waiting on your answer gets one, typed
+    /// in its window, once you've been away long enough. Defaults to off.
+    var answerWhenAway: Bool?
+    /// Minutes without a key or a click that count as away. Defaults to 10.
+    var awayMinutes: Int?
+    /// The answer unless a session has its own (`KeepGoing.Answer` raw value).
+    var awayAnswer: String?
+    var decideMessage: String?
+    var aroundMessage: String?
+    /// Also answer turns that just end on a "?". Defaults to off: often an offer.
+    var answerTextQuestions: Bool?
+
+    var notificationThreshold: Int { notifyAtPercent ?? 90 }
+    var notifiesOnLimitReset: Bool { notifyOnLimitReset ?? true }
+    var keepsWorkGoing: Bool { keepWorkGoing ?? false }
+    var answersWhenAway: Bool { answerWhenAway ?? false }
+    var awayAfter: Int { max(1, awayMinutes ?? 10) }
+    var answersTextQuestions: Bool { answerTextQuestions ?? false }
+
+    /// Every account, in ring order.
+    var relayRing: [LaunchProfile] {
+        let order = relayOrder ?? []
+        let ranked = order.compactMap { id in profiles.first { $0.id == id } }
+        return ranked + profiles.filter { !order.contains($0.id) }
+    }
 
     static let maxMenuBarRows = 3
     static let maxMenuBarColumns = 3

@@ -105,7 +105,7 @@ enum ClaudeLinkRouter {
     /// process - the same event LaunchServices would send. Returns false when macOS
     /// hasn't been allowed to let us send it (the user declines the automation prompt).
     @discardableResult
-    private static func deliver(_ url: URL, to pid: pid_t) -> Bool {
+    static func deliver(_ url: URL, to pid: pid_t) -> Bool {
         // 'GURL'/'GURL' with a '----' direct object: the open-location event, spelled
         // out here so this doesn't have to pull in Carbon for four constants.
         let getURLClass = AEEventClass(0x4755524C)

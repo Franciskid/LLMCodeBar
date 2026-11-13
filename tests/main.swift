@@ -62,7 +62,7 @@ let settings = SettingsWindowController(config: editedConfig, onChange: { mutate
 settings.window!.contentView!.layoutSubtreeIfNeeded()
 check(settings.window!.frame.height < 700, "settings stays compact")
 let pages = descendants(settings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
-check(pages.tabViewItems.map(\.label) == ["General", "Menu bar", "Account"], "General, menu-bar, and account controls each have a page")
+check(pages.tabViewItems.map(\.label) == ["General", "Menu bar", "Account", "Continue after limits"], "General, menu-bar, account and continue controls each have a page")
 check(pages.selectedTabViewItem?.label == "General", "General opens independently")
 pages.selectTabViewItem(at: 1)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
@@ -86,6 +86,18 @@ notificationPicker.selectItem(at: 0)
 _ = notificationPicker.target?.perform(notificationPicker.action!, with: notificationPicker)
 check(editedConfig.profiles[0].manualResetExpiryAlertHours == 0 && ResetReminder.plans(editedConfig.profiles[0]).isEmpty, "Off disables selected account notifications")
 check(editedConfig.menuBarGridRows == 1 && editedConfig.menuBarGridColumns == 3 && editedConfig.showsMenuBarLabels, "notification edits preserve restored menu-bar preferences")
+settings.select(sectionNamed: "continue")
+check(pages.selectedTabViewItem?.label == "Continue after limits", "the menu's gear opens the continue page")
+let continueControls = descendants(pages.tabViewItems[3].view!)
+for id in ["keepGoing", "continuePlan", "continueMessage", "answerAway", "awayMinutes", "awayAnswer", "answerTextQuestions"] {
+    check(continueControls.contains { $0.identifier?.rawValue == id }, "continue setting \(id) is restored")
+}
+let planPicker = continueControls.compactMap { $0 as? NSPopUpButton }.first { $0.identifier?.rawValue == "continuePlan" }!
+planPicker.selectItem(at: 1)
+_ = planPicker.target?.perform(planPicker.action!, with: planPicker)
+check(editedConfig.continuePlan == .move && editedConfig.menuBarGridColumns == 3, "the continue plan saves without touching other settings")
+let general = descendants(pages.tabViewItems[0].view!).compactMap { $0 as? NSPopUpButton }
+check(general.contains { $0.itemTitles.contains("95%") }, "limit notification threshold is restored")
 func snapshot(_ view: NSView, _ name: String) throws {
     view.layoutSubtreeIfNeeded()
     let folder = URL(fileURLWithPath: ".build/design-proof")
@@ -106,10 +118,10 @@ func snapshot(_ view: NSView, _ name: String) throws {
     }
 }
 settings.window!.appearance = NSAppearance(named: .aqua)
-for index in 0...2 {
+for index in 0...3 {
     if index == 2 { accountTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     pages.selectTabViewItem(at: index)
-    try snapshot(settings.window!.contentView!, ["general", "menu-bar", "account"][index])
+    try snapshot(settings.window!.contentView!, ["general", "menu-bar", "account", "continue"][index])
 }
 
 var gridConfig = AppConfig(launchAtLogin: false, profiles: [profile])
