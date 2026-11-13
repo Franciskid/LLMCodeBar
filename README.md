@@ -79,7 +79,9 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 Settings has separate **General**, **Menu bar**, and **Account** pages. General contains app-wide startup, refresh, updates, cookie access, and Claude window integration. Menu bar retains the 1–3 row/column grid, fill order, icon labels, weekly percentage, reset countdowns, stacked/side-by-side arrangement, and live preview. Select an account in the sidebar to open its Account page, including its custom icon label. Each account independently controls menu-bar pinning, trendlines, limit labels, session (5 hour) and weekly (7 day) bars, reset times, and auto-start.
 
-**Reset reminder** is off by default. Choose 5, 15, 30, or 60 minutes before reset for each account and allow macOS notifications when prompted. Reminders use the provider's reset date rather than the refresh timer. A reset with no date cannot generate a reminder. The app must be running to refresh and schedule reminders; macOS notification settings and Focus control their delivery.
+**Manual resets** shows the saved reset allowances on each account, grouped by kind and redemption deadline: Full, 5-hour, Weekly, or Fable. Claude's grant inventory and Codex's banked reset-credit inventory supply the counts and expiry dates. These are separate from automatic 5-hour and weekly quota timers. Expired, spent, and paused grants are excluded; upcoming grants show when they become available. If a read fails, cached counts are marked and the app never reports a failed read as a zero balance.
+
+On the Account page, **Show available manual resets and their expiry** controls their display. **Expiry alert** can notify 1, 6, 24, or 72 hours before a manual reset expires. Allow macOS notifications when prompted. This is a reminder to redeem a saved reset before its deadline; it does not notify about automatic usage-window refreshes or consume any reset. Redemption remains in the provider's own Usage settings. The app must be running to refresh and schedule alerts; macOS Focus and notification settings control delivery.
 
 ### T3 Code transfers
 

@@ -399,6 +399,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     profile.showWeeklyWindows = live.showWeeklyWindows
                     profile.showResetTimes = live.showResetTimes
                     profile.resetAlertMinutes = live.resetAlertMinutes
+                    profile.showManualResets = live.showManualResets
+                    profile.manualResetExpiryAlertHours = live.manualResetExpiryAlertHours
                     profile.autoStartSession = live.autoStartSession
                     return profile
                 }

@@ -50,6 +50,8 @@ struct UsageInfo: Codable {
     var accountPlan: String?
     var updatedAt: Date
 
+    var manualResets: ManualResetInventory?
+
     var primaryPercentUsed: Double? {
         windows.first?.usedPercent
     }
@@ -156,7 +158,9 @@ struct LaunchProfile: Codable, Identifiable {
     var showSessionWindow: Bool?
     var showWeeklyWindows: Bool?
     var showResetTimes: Bool?
-    var resetAlertMinutes: Int?
+    var resetAlertMinutes: Int? // Legacy automatic-window reminder; no longer scheduled.
+    var showManualResets: Bool?
+    var manualResetExpiryAlertHours: Int?
 
     func visibleWindows() -> [UsageWindow] {
         (usage?.windows ?? []).filter {

@@ -45,8 +45,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let showLabels = NSButton(checkboxWithTitle: "Show limit labels and percentages", target: nil, action: nil)
     private let showSession = NSButton(checkboxWithTitle: "Show session (5 hour) limit", target: nil, action: nil)
     private let showWeeklyLimits = NSButton(checkboxWithTitle: "Show weekly (7 day) limits", target: nil, action: nil)
-    private let showResets = NSButton(checkboxWithTitle: "Show reset times", target: nil, action: nil)
+    private let showResets = NSButton(checkboxWithTitle: "Show automatic reset times", target: nil, action: nil)
     private let resetAlerts = NSPopUpButton()
+    private let showManualResets = NSButton(checkboxWithTitle: "Show available manual resets and their expiry", target: nil, action: nil)
 
     // App-wide (General) controls.
     private let launchAtLogin = NSButton(checkboxWithTitle: "Launch LLMCodeBar at login", target: nil, action: nil)
@@ -327,12 +328,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             control.action = #selector(displayChanged)
             form.addArrangedSubview(control)
         }
-        resetAlerts.addItems(withTitles: ["Off", "5 minutes before", "15 minutes before", "30 minutes before", "1 hour before"])
+        resetAlerts.addItems(withTitles: ["Off", "1 hour before expiry", "6 hours before expiry", "24 hours before expiry", "3 days before expiry"])
         resetAlerts.target = self
         resetAlerts.action = #selector(displayChanged)
-        let alertRow = NSStackView(views: [NSTextField(labelWithString: "Reset reminder"), resetAlerts])
+        let alertRow = NSStackView(views: [NSTextField(labelWithString: "Expiry alert"), resetAlerts])
         alertRow.spacing = 8
-        form.addArrangedSubview(sectionHeading("Reset reminders"))
+        form.addArrangedSubview(sectionHeading("Manual resets"))
+        showManualResets.target = self
+        showManualResets.action = #selector(displayChanged)
+        form.addArrangedSubview(showManualResets)
         form.addArrangedSubview(alertRow)
         form.addArrangedSubview(sectionHeading("Session start"))
         form.addArrangedSubview(autoStartRow)
@@ -613,8 +617,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         showSession.state = (profile.showSessionWindow ?? true) ? .on : .off
         showWeeklyLimits.state = (profile.showWeeklyWindows ?? true) ? .on : .off
         showResets.state = (profile.showResetTimes ?? true) ? .on : .off
-        resetAlerts.selectItem(at: [0, 5, 15, 30, 60].firstIndex(of: profile.resetAlertMinutes ?? 0) ?? 0)
-        let accountControls = [showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
+        showManualResets.state = (profile.showManualResets ?? true) ? .on : .off
+        resetAlerts.selectItem(at: [0, 1, 6, 24, 72].firstIndex(of: profile.manualResetExpiryAlertHours ?? 0) ?? 0)
+        let accountControls = [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
 
         labelField.stringValue = profile.label
@@ -654,7 +659,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
+        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
         iconLabelField.stringValue = ""
         iconLabelDefault.stringValue = ""
@@ -664,7 +669,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func displayChanged() {
         guard let id = selectedID else { return }
         let values = [showSparklines, showLabels, showSession, showWeeklyLimits, showResets].map { $0.state == .on }
-        let minutes = [0, 5, 15, 30, 60][max(0, resetAlerts.indexOfSelectedItem)]
+        let hours = [0, 1, 6, 24, 72][max(0, resetAlerts.indexOfSelectedItem)]
+        let manual = showManualResets.state == .on
         commit { cfg in
             guard let i = cfg.profiles.firstIndex(where: { $0.id == id }) else { return }
             cfg.profiles[i].showSparklines = values[0]
@@ -672,9 +678,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             cfg.profiles[i].showSessionWindow = values[2]
             cfg.profiles[i].showWeeklyWindows = values[3]
             cfg.profiles[i].showResetTimes = values[4]
-            cfg.profiles[i].resetAlertMinutes = minutes
+            cfg.profiles[i].showManualResets = manual
+            cfg.profiles[i].manualResetExpiryAlertHours = hours
         }
-        if minutes > 0 { ResetReminder.requestAuthorization(profiles: config.profiles) }
+        if hours > 0 { ResetReminder.requestAuthorization(profiles: config.profiles) }
     }
 
     // MARK: Account actions
