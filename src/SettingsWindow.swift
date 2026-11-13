@@ -1,6 +1,7 @@
 import AppKit
+import UserNotifications
 
-final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
     private var config: AppConfig
     /// Applies an edit to the app's live config (and this window's copy). Immediate
     /// apply means there's no unsaved state to lose, so nothing "resets".
@@ -21,7 +22,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let appPathField = NSTextField()
     private let dataDirField = NSTextField()
     private let providerPopup = NSPopUpButton()
-    private let advancedToggle = NSButton()
     private let advancedStack = NSStackView()
     private let iconLabelField = NSTextField()
     private let iconLabelDefault = NSTextField(labelWithString: "")
@@ -38,6 +38,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let resetTimesPopup = NSPopUpButton()
     private let arrangePopup = NSPopUpButton()
 
+    private let generalNavigation = SettingsNavigationButton(title: "General", target: nil, action: nil)
+    private let menuBarNavigation = SettingsNavigationButton(title: "Menu bar", target: nil, action: nil)
+    private let accountPicker = NSSegmentedControl(labels: ["Display", "Sessions", "Advanced"], trackingMode: .selectOne, target: nil, action: nil)
+    private let accountSections = NSTabView()
+    private var accountSectionHeight: NSLayoutConstraint?
+    private let displayPage = NSStackView()
+    private let sessionsPage = NSStackView()
+    private let manualInventory = NSStackView()
+    private let notificationStatus = NSTextField(labelWithString: "")
+    private let accountNotificationStatus = NSTextField(labelWithString: "")
     private let accountPage = NSStackView()
     private let generalPage = NSStackView()
     private let pages = NSTabView()
@@ -72,64 +82,82 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.onChange = onChange
         self.onCheckForUpdates = onCheckForUpdates
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 650),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
         window.title = "LLMCodeBar Settings"
-        window.minSize = NSSize(width: 900, height: 580)
+        window.minSize = NSSize(width: 760, height: 600)
         window.center()
         super.init(window: window)
         buildUI()
+        window.delegate = self
         loadSelection()
-        pages.selectTabViewItem(at: 0)
+        navigate(to: 0)
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func windowDidBecomeKey(_ notification: Notification) { refreshNotificationPermission() }
 
     // MARK: Account list
 
     func numberOfRows(in tableView: NSTableView) -> Int { config.profiles.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = NSTableCellView()
         let profile = config.profiles[row]
-        let text = NSTextField(labelWithString: profile.label)
-        text.translatesAutoresizingMaskIntoConstraints = false
-        text.lineBreakMode = .byTruncatingTail
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        cell.addSubview(text)
+        let cell = NSTableCellView()
+        let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath)))
+        let title = NSTextField(labelWithString: "\(profile.provider.displayName) · \(profile.menuBarLabelText)")
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        let subtitle = NSTextField(labelWithString: profile.accountEmail?.components(separatedBy: "@").first ?? profile.accountName ?? "Connect account")
+        subtitle.font = .systemFont(ofSize: 10)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.lineBreakMode = .byTruncatingMiddle
+        let text = NSStackView(views: [title, subtitle])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 2
+        for view in [icon, text] { view.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(view) }
         NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5),
+            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 22), icon.heightAnchor.constraint(equalToConstant: 22),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            subtitle.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor),
         ])
-        // Its place in the menu-bar grid, when it's pinned there.
-        let pinned = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
-        if let place = pinned.firstIndex(of: profile.id) {
-            let badge = NSTextField(labelWithString: "\(place + 1)")
-            badge.font = .systemFont(ofSize: 10, weight: .bold)
-            badge.textColor = .controlAccentColor
-            badge.alignment = .center
-            badge.wantsLayer = true
-            badge.layer?.cornerRadius = 8
-            badge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.15).cgColor
-            badge.toolTip = "Place \(place + 1) in the menu bar"
-            badge.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(badge)
-            NSLayoutConstraint.activate([
-                badge.widthAnchor.constraint(equalToConstant: 16),
-                badge.heightAnchor.constraint(equalToConstant: 16),
-                badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-                badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -6),
-            ])
-        } else {
-            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -8).isActive = true
-        }
         return cell
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection(); pages.selectTabViewItem(at: 2) }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        loadSelection()
+        if table.selectedRow >= 0 { navigate(to: 2) }
+    }
+
+    private func navigate(to index: Int) {
+        pages.selectTabViewItem(at: index)
+        generalNavigation.state = index == 0 ? .on : .off
+        menuBarNavigation.state = index == 1 ? .on : .off
+        for button in [generalNavigation, menuBarNavigation] {
+            button.contentTintColor = button.state == .on ? .controlAccentColor : .labelColor
+        }
+        if index != 2 { table.deselectAll(nil) }
+        refreshNotificationPermission()
+    }
+
+    @objc private func showGeneral() { navigate(to: 0) }
+    @objc private func showMenuBar() { navigate(to: 1) }
+    @objc private func accountSectionChanged() {
+        accountSections.selectTabViewItem(at: max(0, accountPicker.selectedSegment))
+        resizeAccountSection()
+    }
+
+    private func resizeAccountSection() {
+        let page = [displayPage, sessionsPage, advancedStack][max(0, accountPicker.selectedSegment)]
+        accountSectionHeight?.constant = max(220, page.fittingSize.height + 5)
+    }
 
     // MARK: Immediate apply
 
@@ -139,11 +167,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         config.menuBarProfileIDs = newConfig.menuBarProfileIDs
         config.menuBarProfileID = newConfig.menuBarProfileID
         config.showPercentInMenuBar = newConfig.showPercentInMenuBar
+        let index = pages.indexOfTabViewItem(pages.selectedTabViewItem!)
         let id = selectedID
         table.reloadData()
         if let id { restoreSelection(id: id) }
         loadSelection()
         refreshMenuBarSection()
+        navigate(to: index)
     }
 
     private func commit(_ mutate: @escaping (inout AppConfig) -> Void) {
@@ -161,261 +191,222 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
-
-        // Left: account list + add / rescan.
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
+        let sidebar = NSVisualEffectView()
+        sidebar.material = .sidebar
+        sidebar.blendingMode = .behindWindow
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(sidebar)
+        for (button, selector) in [(generalNavigation, #selector(showGeneral)), (menuBarNavigation, #selector(showMenuBar))] {
+            button.target = self; button.action = selector
+            button.setButtonType(.toggle)
+            button.bezelStyle = .recessed
+            button.alignment = .left
+            button.font = .systemFont(ofSize: 12, weight: .medium)
+        }
+        let caption = sectionHeading("Accounts")
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile")))
         table.headerView = nil
-        table.delegate = self
-        table.dataSource = self
-        table.rowHeight = 28
+        table.delegate = self; table.dataSource = self
+        table.rowHeight = 46
+        table.style = .sourceList
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
         scroll.documentView = table
-
-        let listTitle = NSTextField(labelWithString: "Accounts")
-        listTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-        let addAccountButton = NSButton(title: "+", target: self, action: #selector(addAccount))
-        addAccountButton.bezelStyle = .rounded
-        addAccountButton.toolTip = "Add a Claude or ChatGPT account"
-        addAccountButton.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        let listHeader = NSStackView(views: [listTitle, addAccountButton])
-        listHeader.orientation = .horizontal
-        listHeader.spacing = 8
-        listTitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let rescan = NSButton(title: "Rescan for accounts", target: self, action: #selector(rescanAccounts))
-        rescan.bezelStyle = .rounded
-        rescan.controlSize = .small
-
-        removeButton.title = "Remove selected account"
-        removeButton.target = self
-        removeButton.action = #selector(removeAccount)
-        removeButton.bezelStyle = .rounded
-        removeButton.controlSize = .small
-        if #available(macOS 11.0, *) { removeButton.hasDestructiveAction = true }
-
-        let leftPane = NSStackView(views: [listHeader, scroll, rescan, removeButton])
-        leftPane.translatesAutoresizingMaskIntoConstraints = false
-        leftPane.orientation = .vertical
-        leftPane.spacing = 8
-        leftPane.alignment = .leading
-        leftPane.setCustomSpacing(16, after: rescan)
-        scroll.widthAnchor.constraint(equalTo: leftPane.widthAnchor).isActive = true
-
-        // Each destination owns a complete page; account selection opens Account.
+        let add = NSButton(title: "+ Add", target: self, action: #selector(addAccount))
+        let rescan = NSButton(title: "Rescan", target: self, action: #selector(rescanAccounts))
+        for button in [add, rescan] { button.bezelStyle = .rounded; button.controlSize = .small }
+        let footer = NSStackView(views: [add, rescan]); footer.spacing = 6
+        let navigation = NSStackView(views: [generalNavigation, menuBarNavigation, caption, scroll, footer])
+        navigation.orientation = .vertical; navigation.alignment = .leading; navigation.spacing = 6
+        navigation.setCustomSpacing(22, after: menuBarNavigation)
+        navigation.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(navigation)
+        for view in [generalNavigation, menuBarNavigation, scroll] {
+            view.widthAnchor.constraint(equalTo: navigation.widthAnchor).isActive = true
+        }
+        pages.tabViewType = .noTabsNoBorder
         pages.translatesAutoresizingMaskIntoConstraints = false
         for (title, page) in [("General", generalPage), ("Menu bar", menuBarPage), ("Account", accountPage)] {
-            page.orientation = .vertical
-            page.alignment = .leading
-            page.spacing = 12
-            page.translatesAutoresizingMaskIntoConstraints = false
-            let item = NSTabViewItem(identifier: title)
-            item.label = title
-            let scroll = NSScrollView()
-            scroll.hasVerticalScroller = true
-            scroll.drawsBackground = false
-            let document = FlippedView()
-            document.translatesAutoresizingMaskIntoConstraints = false
-            document.addSubview(page)
-            scroll.documentView = document
-            item.view = scroll
+            configure(page)
+            let item = NSTabViewItem(identifier: title); item.label = title
+            let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false
+            let document = FlippedView(); document.translatesAutoresizingMaskIntoConstraints = false
+            document.addSubview(page); scroll.documentView = document; item.view = scroll
             pages.addTabViewItem(item)
             NSLayoutConstraint.activate([
                 document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-                page.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
-                page.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
-                page.topAnchor.constraint(equalTo: document.topAnchor, constant: 20),
+                page.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 26),
+                page.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -26),
+                page.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
                 page.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -20),
             ])
         }
         buildGeneralSection(into: generalPage)
         buildMenuBarSection(into: menuBarPage)
         buildAccountSection(into: accountPage)
-
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor; statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(leftPane)
-        content.addSubview(pages)
-        content.addSubview(statusLabel)
+        content.addSubview(pages); content.addSubview(statusLabel)
         NSLayoutConstraint.activate([
-            leftPane.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            leftPane.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            leftPane.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-            leftPane.widthAnchor.constraint(equalToConstant: 220),
-            pages.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
-            pages.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            pages.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
-            pages.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
-            statusLabel.leadingAnchor.constraint(equalTo: pages.leadingAnchor, constant: 8),
-            statusLabel.trailingAnchor.constraint(equalTo: pages.trailingAnchor, constant: -8),
-            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            sidebar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: content.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 190),
+            navigation.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+            navigation.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+            navigation.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 18),
+            navigation.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -18),
+            pages.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            pages.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            pages.topAnchor.constraint(equalTo: content.topAnchor),
+            pages.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
+            statusLabel.leadingAnchor.constraint(equalTo: pages.leadingAnchor, constant: 26),
+            statusLabel.trailingAnchor.constraint(equalTo: pages.trailingAnchor, constant: -26),
+            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
         ])
-        if !config.profiles.isEmpty {
-            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        if !config.profiles.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+    }
+
+    private func configure(_ stack: NSStackView) {
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func heading(_ title: String, subtitle: String, into form: NSStackView) {
+        let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 22, weight: .semibold)
+        form.addArrangedSubview(label); form.setCustomSpacing(5, after: label)
+        let detail = helpLabel(subtitle); form.addArrangedSubview(detail); form.setCustomSpacing(18, after: detail)
+    }
+
+    private func preference(_ title: String, control: NSView, into form: NSStackView, id: String? = nil) {
+        if let id { control.identifier = NSUserInterfaceItemIdentifier(id) }
+        if let button = control as? NSButton,
+           [menuBarAccount, autoStartSession, showIconLabels, showWeekly, showLabels, showSession, showWeeklyLimits, showResets, showManualResets, launchAtLogin, showSparklines, autoApproveCookies, autoUpdate, routeClaudeLinks, offerClaudeUpdates].contains(where: { $0 === button }) {
+            button.title = ""; button.setAccessibilityLabel(title)
         }
+        let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 12)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let spacer = NSView()
+        let row = NSStackView(views: [label, spacer, control]); row.spacing = 12; row.alignment = .centerY
+        control.setContentHuggingPriority(.required, for: .horizontal)
+        control.setContentCompressionResistancePriority(.required, for: .horizontal)
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        form.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        let line = NSBox(); line.boxType = .separator
+        form.addArrangedSubview(line); line.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+    }
+
+    private func section(_ title: String, into form: NSStackView) {
+        let container = FlippedView()
+        let label = sectionHeading(title); label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label); form.addArrangedSubview(container)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalTo: form.widthAnchor), container.heightAnchor.constraint(equalToConstant: 32),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor), label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -3),
+        ])
     }
 
     private func buildAccountSection(into form: NSStackView) {
-        accountTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        accountSubtitle.font = .systemFont(ofSize: 12)
-        accountSubtitle.textColor = .secondaryLabelColor
-        let header = NSStackView(views: [accountTitle, accountSubtitle])
-        header.orientation = .vertical
-        header.alignment = .leading
-        header.spacing = 1
-
-        menuBarAccount.target = self
-        menuBarAccount.action = #selector(menuBarAccountChanged)
-        menuBarAccount.toolTip = "Show this account's 5h session % in the menu bar, with its app icon. How many fit, and how they're laid out, is set on the Menu bar page."
-
-        iconLabelField.delegate = self
-        iconLabelField.placeholderString = ""
-        iconLabelField.toolTip = "Up to 3 characters, drawn on this account's app icon in the menu bar when \"Show a label on each app icon\" is on. Leave it empty for the first 2 characters of the email."
-        iconLabelField.widthAnchor.constraint(equalToConstant: 56).isActive = true
-        iconLabelDefault.font = .systemFont(ofSize: 11)
-        iconLabelDefault.textColor = .tertiaryLabelColor
-        let iconLabelRow = NSStackView(views: [NSTextField(labelWithString: "Icon label"), iconLabelField, iconLabelDefault])
-        iconLabelRow.orientation = .horizontal
-        iconLabelRow.spacing = 8
-
-        autoStartSession.target = self
-        autoStartSession.action = #selector(autoStartChanged)
-        autoStartSession.toolTip = "When the 5h window is idle or has reset, LLMCodeBar sends one tiny \"hi\" on the cheapest model to start it. For Claude it uses a throwaway chat that's deleted after. Only fires when the session isn't already running. ChatGPT is experimental."
-        startSessionNow.target = self
-        startSessionNow.action = #selector(startSessionNowTapped)
-        startSessionNow.bezelStyle = .rounded
-        let autoStartRow = NSStackView(views: [autoStartSession, startSessionNow])
-        autoStartRow.orientation = .horizontal
-        autoStartRow.spacing = 10
-
-        let autoStartHelp = helpLabel("Starts the 5h window when it's idle by sending a tiny \"hi\" on the cheapest model. Only acts when the session isn't already running. ChatGPT is experimental.")
-
-        // Advanced (label / paths), collapsed.
-        advancedStack.orientation = .vertical
-        advancedStack.spacing = 8
-        providerPopup.addItems(withTitles: Provider.allCases.map(\.displayName))
-        for field in [labelField, appPathField, dataDirField] { field.delegate = self }
-        providerPopup.target = self
-        providerPopup.action = #selector(providerChanged)
-        addRow(to: advancedStack, label: "Label", control: labelField)
-        addRow(to: advancedStack, label: "Provider", control: providerPopup)
-        addRow(to: advancedStack, label: "App path", control: appPathField)
-        addRow(to: advancedStack, label: "Profile folder", control: dataDirField)
-        advancedStack.isHidden = true
-
-        advancedToggle.bezelStyle = .disclosure
-        advancedToggle.setButtonType(.pushOnPushOff)
-        advancedToggle.title = ""
-        advancedToggle.target = self
-        advancedToggle.action = #selector(toggleAdvanced)
-        let advancedLabel = NSTextField(labelWithString: "Advanced")
-        advancedLabel.textColor = .secondaryLabelColor
-        let advancedHeader = NSStackView(views: [advancedToggle, advancedLabel])
-        advancedHeader.orientation = .horizontal
-        advancedHeader.spacing = 4
-
-        form.addArrangedSubview(header)
-        form.setCustomSpacing(12, after: header)
-        form.addArrangedSubview(sectionHeading("Menu bar identity"))
-        form.addArrangedSubview(menuBarAccount)
-        form.addArrangedSubview(iconLabelRow)
-        form.addArrangedSubview(sectionHeading("Usage display"))
-        for control in [showSparklines, showLabels, showSession, showWeeklyLimits, showResets] {
-            control.target = self
-            control.action = #selector(displayChanged)
-            form.addArrangedSubview(control)
+        accountTitle.font = .systemFont(ofSize: 22, weight: .semibold)
+        accountSubtitle.font = .systemFont(ofSize: 11); accountSubtitle.textColor = .secondaryLabelColor
+        form.addArrangedSubview(accountTitle); form.setCustomSpacing(5, after: accountTitle)
+        form.addArrangedSubview(accountSubtitle); form.setCustomSpacing(18, after: accountSubtitle)
+        accountPicker.selectedSegment = 0; accountPicker.target = self; accountPicker.action = #selector(accountSectionChanged)
+        accountPicker.segmentStyle = .rounded
+        form.addArrangedSubview(accountPicker); form.setCustomSpacing(14, after: accountPicker)
+        accountPicker.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        accountSections.tabViewType = .noTabsNoBorder
+        for (title, page) in [("Display", displayPage), ("Sessions", sessionsPage), ("Advanced", advancedStack)] {
+            configure(page)
+            let item = NSTabViewItem(identifier: title); item.label = title
+            let container = FlippedView(); container.addSubview(page); item.view = container
+            NSLayoutConstraint.activate([
+                page.leadingAnchor.constraint(equalTo: container.leadingAnchor), page.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                page.topAnchor.constraint(equalTo: container.topAnchor),
+                page.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor),
+            ])
+            accountSections.addTabViewItem(item)
         }
-        resetAlerts.addItems(withTitles: ["Off", "1 hour before expiry", "6 hours before expiry", "24 hours before expiry", "3 days before expiry"])
-        resetAlerts.target = self
-        resetAlerts.action = #selector(displayChanged)
-        let alertRow = NSStackView(views: [NSTextField(labelWithString: "Expiry alert"), resetAlerts])
-        alertRow.spacing = 8
-        form.addArrangedSubview(sectionHeading("Manual resets"))
-        showManualResets.target = self
-        showManualResets.action = #selector(displayChanged)
-        form.addArrangedSubview(showManualResets)
-        form.addArrangedSubview(alertRow)
-        form.addArrangedSubview(sectionHeading("Session start"))
-        form.addArrangedSubview(autoStartRow)
-        form.addArrangedSubview(autoStartHelp)
-        form.addArrangedSubview(advancedHeader)
-        form.addArrangedSubview(advancedStack)
+        accountSections.translatesAutoresizingMaskIntoConstraints = false
+        form.addArrangedSubview(accountSections)
+        accountSections.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        accountSectionHeight = accountSections.heightAnchor.constraint(equalToConstant: 470)
+        accountSectionHeight?.isActive = true
+        menuBarAccount.target = self; menuBarAccount.action = #selector(menuBarAccountChanged)
+        preference("Pin in menu bar", control: menuBarAccount, into: displayPage, id: "menuBarAccount")
+        iconLabelField.delegate = self
+        iconLabelField.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        iconLabelField.toolTip = "Up to 3 characters. Leave empty for the first two characters of the email."
+        preference("Icon label", control: iconLabelField, into: displayPage, id: "iconLabel")
+        for (title, control, id) in [("Session bar", showSession, "showSession"), ("Weekly bar", showWeeklyLimits, "showWeeklyLimits"),
+                                      ("Trendlines", showSparklines, "showSparklines"), ("Labels", showLabels, "showLabels"),
+                                      ("Automatic reset times", showResets, "showResets")] {
+            control.target = self; control.action = #selector(displayChanged(_:))
+            preference(title, control: control, into: displayPage, id: id)
+        }
+        section("Manual resets", into: displayPage)
+        showManualResets.target = self; showManualResets.action = #selector(displayChanged(_:))
+        preference("Show in menu", control: showManualResets, into: displayPage, id: "showManualResets")
+        configure(manualInventory); manualInventory.spacing = 4
+        displayPage.addArrangedSubview(manualInventory)
+        manualInventory.widthAnchor.constraint(equalTo: displayPage.widthAnchor).isActive = true
+        resetAlerts.addItems(withTitles: ["Off", "1 hour before", "6 hours before", "24 hours before", "3 days before"])
+        resetAlerts.target = self; resetAlerts.action = #selector(displayChanged(_:))
+        resetAlerts.toolTip = "Notify before an unused manual reset reaches its redemption deadline."
+        preference("Expiry notification", control: resetAlerts, into: displayPage, id: "resetAlerts")
+        accountNotificationStatus.font = .systemFont(ofSize: 10); accountNotificationStatus.textColor = .secondaryLabelColor
+        displayPage.addArrangedSubview(accountNotificationStatus)
+
+        autoStartSession.target = self; autoStartSession.action = #selector(autoStartChanged)
+        preference("Auto-start 5h session", control: autoStartSession, into: sessionsPage, id: "autoStartSession")
+        startSessionNow.target = self; startSessionNow.action = #selector(startSessionNowTapped); startSessionNow.bezelStyle = .rounded
+        preference("Start a new session", control: startSessionNow, into: sessionsPage, id: "startSessionNow")
+        sessionsPage.addArrangedSubview(helpLabel("Starts an idle 5h session with a tiny message on the cheapest model. ChatGPT is experimental."))
+        providerPopup.addItems(withTitles: Provider.allCases.map(\.displayName)); providerPopup.target = self; providerPopup.action = #selector(providerChanged)
+        for field in [labelField, appPathField, dataDirField] {
+            field.delegate = self; field.widthAnchor.constraint(equalToConstant: 310).isActive = true
+        }
+        preference("Label", control: labelField, into: advancedStack)
+        preference("Provider", control: providerPopup, into: advancedStack)
+        preference("App path", control: appPathField, into: advancedStack)
+        preference("Profile folder", control: dataDirField, into: advancedStack)
+        removeButton.title = "Remove account…"; removeButton.bezelStyle = .rounded
+        removeButton.target = self; removeButton.action = #selector(removeAccount)
+        preference("Account", control: removeButton, into: advancedStack)
     }
 
     private func buildMenuBarSection(into form: NSStackView) {
-        let title = NSTextField(labelWithString: "Menu bar")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        gridPicker.toolTip = "How many rows and columns of accounts the menu bar shows, up to 3 by 3."
+        heading("Menu bar", subtitle: "Grid and default layout", into: form)
+        gridPicker.toolTip = "Choose up to 3 rows and 3 columns."
         gridPicker.onHover = { [weak self] size in self?.showGridLabel(size) }
         gridPicker.onPick = { [weak self] rows, columns in self?.gridPicked(rows: rows, columns: columns) }
-        gridLabel.font = .systemFont(ofSize: 11)
-        gridLabel.textColor = .secondaryLabelColor
-        orderPopup.addItems(withTitles: ["Down each column, then the next column", "Along the top row, then the next row"])
-        orderPopup.target = self
-        orderPopup.action = #selector(orderChanged)
-        orderPopup.toolTip = "Which way the pinned accounts fill the grid, in the order you pinned them."
-        capacityHelp.font = .systemFont(ofSize: 10.5)
-        capacityHelp.textColor = .tertiaryLabelColor
-        // The size, the fill order and the capacity sit beside the picker to keep the
-        // window short enough for a laptop screen.
-        let gridSide = NSStackView(views: [gridLabel, orderPopup, capacityHelp])
-        gridSide.orientation = .vertical
-        gridSide.alignment = .leading
-        gridSide.spacing = 5
-        let layoutLabel = NSTextField(labelWithString: "Layout")
-        let layoutRow = NSStackView(views: [layoutLabel, gridPicker, gridSide])
-        layoutRow.orientation = .horizontal
-        layoutRow.alignment = .top
-        layoutRow.spacing = 8
-
-        showWeekly.target = self
-        showWeekly.action = #selector(oneRowDetailsChanged)
-        showWeekly.toolTip = "Also show each account's weekly usage %."
+        preference("Layout", control: gridPicker, into: form)
+        gridLabel.font = .systemFont(ofSize: 11); gridLabel.textColor = .secondaryLabelColor
+        form.addArrangedSubview(gridLabel); form.setCustomSpacing(8, after: gridLabel)
+        orderPopup.addItems(withTitles: ["Down each column", "Across each row"])
+        orderPopup.target = self; orderPopup.action = #selector(orderChanged)
+        preference("Fill order", control: orderPopup, into: form)
+        showIconLabels.target = self; showIconLabels.action = #selector(showIconLabelsChanged)
+        preference("Icon labels", control: showIconLabels, into: form, id: "showIconLabels")
+        showWeekly.target = self; showWeekly.action = #selector(oneRowDetailsChanged)
+        preference("Weekly usage", control: showWeekly, into: form, id: "showWeekly")
         resetTimesPopup.addItems(withTitles: MenuBarResetTimes.allCases.map(\.title))
-        resetTimesPopup.target = self
-        resetTimesPopup.action = #selector(oneRowDetailsChanged)
-        resetTimesPopup.toolTip = "How long until the 5h and weekly limits reset, in one unit: 3d, then 4h, then 7m."
-        arrangePopup.addItems(withTitles: ["Stacked: 5h above weekly", "Side by side"])
-        arrangePopup.target = self
-        arrangePopup.action = #selector(oneRowDetailsChanged)
-        let oneRowRow = NSStackView(views: [NSTextField(labelWithString: "On one row"), showWeekly,
-                                            NSTextField(labelWithString: "Time to reset"), resetTimesPopup])
-        oneRowRow.orientation = .horizontal
-        oneRowRow.spacing = 8
-        oneRowRow.setCustomSpacing(16, after: showWeekly)
-        let arrangeRow = NSStackView(views: [NSTextField(labelWithString: "Arrange"), arrangePopup])
-        arrangeRow.orientation = .horizontal
-        arrangeRow.spacing = 8
-        let oneRowHelp = helpLabel("When the accounts fit on one row (a 1-row layout, or one account pinned). With 2 or 3 rows only the 5h % fits.")
-
-        showIconLabels.target = self
-        showIconLabels.action = #selector(showIconLabelsChanged)
-        showIconLabels.toolTip = "Draws a short label (set on the Account page) on each app icon in the menu bar, so two accounts of the same app can be told apart."
-        let labelsHelp = helpLabel("Each account's label is set on its Account page. Left empty, it's the first 2 characters of the email.")
-
+        resetTimesPopup.target = self; resetTimesPopup.action = #selector(oneRowDetailsChanged)
+        preference("Quota countdowns", control: resetTimesPopup, into: form)
+        arrangePopup.addItems(withTitles: ["Stacked", "Side by side"]); arrangePopup.target = self; arrangePopup.action = #selector(oneRowDetailsChanged)
+        preference("Arrangement", control: arrangePopup, into: form)
+        form.addArrangedSubview(helpLabel("Weekly usage and countdowns appear when the accounts fit on one row."))
+        section("Preview", into: form)
         previewImage.imageScaling = .scaleNone
-        previewEmpty.font = .systemFont(ofSize: 11)
-        previewEmpty.textColor = .tertiaryLabelColor
-        let previewBox = AppearanceAwareStack(views: [previewImage, previewEmpty])
-        previewBox.orientation = .horizontal
-        previewBox.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
-        previewBox.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        let previewRow = NSStackView(views: [NSTextField(labelWithString: "Preview"), previewBox])
-        previewRow.orientation = .horizontal
-        previewRow.spacing = 8
-
-        form.addArrangedSubview(title)
-        form.addArrangedSubview(layoutRow)
-        form.addArrangedSubview(oneRowRow)
-        form.addArrangedSubview(arrangeRow)
-        form.addArrangedSubview(oneRowHelp)
-        form.addArrangedSubview(showIconLabels)
-        form.addArrangedSubview(labelsHelp)
-        form.addArrangedSubview(previewRow)
+        previewEmpty.font = .systemFont(ofSize: 11); previewEmpty.textColor = .secondaryLabelColor
+        let preview = AppearanceAwareStack(views: [previewImage, previewEmpty])
+        preview.orientation = .horizontal; preview.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        form.addArrangedSubview(preview)
+        capacityHelp.font = .systemFont(ofSize: 10); capacityHelp.textColor = .secondaryLabelColor
+        form.addArrangedSubview(capacityHelp)
         refreshMenuBarSection()
     }
 
@@ -427,7 +418,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         orderPopup.selectItem(at: config.fillsMenuBarRowsFirst ? 1 : 0)
         orderPopup.isEnabled = config.menuBarGridRows > 1 && config.menuBarGridColumns > 1
         showIconLabels.state = config.showsMenuBarLabels ? .on : .off
-        iconLabelField.isEnabled = selectedID != nil && config.showsMenuBarLabels
+        iconLabelField.isEnabled = selectedID != nil
         showWeekly.state = config.showsMenuBarWeekly ? .on : .off
         resetTimesPopup.selectItem(at: MenuBarResetTimes.allCases.firstIndex(of: config.menuBarResets) ?? 0)
         arrangePopup.selectItem(at: config.menuBarDetailsSideBySide ? 1 : 0)
@@ -496,74 +487,55 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private func buildGeneralSection(into form: NSStackView) {
-        let title = NSTextField(labelWithString: "General")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.toolTip = "Applies to LLMCodeBar, not to any single account."
-
+        heading("General", subtitle: "App preferences", into: form)
+        section("Startup & refresh", into: form)
         launchAtLogin.state = (config.launchAtLogin || AutostartManager.isEnabled) ? .on : .off
-        launchAtLogin.toolTip = "Start LLMCodeBar itself when you log in to your Mac. (Not the Claude or ChatGPT apps.)"
-        launchAtLogin.target = self
-        launchAtLogin.action = #selector(launchAtLoginChanged)
-
+        launchAtLogin.target = self; launchAtLogin.action = #selector(launchAtLoginChanged)
+        preference("Launch at login", control: launchAtLogin, into: form)
         refreshIntervalPopup.addItems(withTitles: refreshOptions.map(\.title))
         let current = Int(config.refreshInterval)
-        let closest = refreshOptions.enumerated().min(by: { abs($0.element.seconds - current) < abs($1.element.seconds - current) })
-        refreshIntervalPopup.selectItem(at: closest?.offset ?? 1)
-        refreshIntervalPopup.target = self
-        refreshIntervalPopup.action = #selector(refreshIntervalChanged)
-        let refreshLabel = NSTextField(labelWithString: "Refresh every")
-        let refreshRow = NSStackView(views: [refreshLabel, refreshIntervalPopup])
-        refreshRow.orientation = .horizontal
-        refreshRow.spacing = 8
-        refreshIntervalPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        refreshIntervalPopup.selectItem(at: refreshOptions.enumerated().min { abs($0.element.seconds - current) < abs($1.element.seconds - current) }?.offset ?? 1)
+        refreshIntervalPopup.target = self; refreshIntervalPopup.action = #selector(refreshIntervalChanged)
+        preference("Refresh every", control: refreshIntervalPopup, into: form)
+        section("Updates", into: form)
+        autoUpdate.state = config.autoUpdates ? .on : .off; autoUpdate.target = self; autoUpdate.action = #selector(autoUpdateChanged)
+        preference("Install updates automatically", control: autoUpdate, into: form)
+        checkForUpdatesButton.bezelStyle = .rounded; checkForUpdatesButton.target = self; checkForUpdatesButton.action = #selector(checkForUpdatesNow)
+        preference("Version \(Updater.currentVersion)", control: checkForUpdatesButton, into: form)
+        section("Access & Claude windows", into: form)
+        autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off; autoApproveCookies.target = self; autoApproveCookies.action = #selector(cookiesChanged)
+        autoApproveCookies.toolTip = "Approve Claude cookie-store access once through the macOS keychain. Turn off to read live cookies only while Claude is open."
+        preference("Auto-approve cookie access", control: autoApproveCookies, into: form)
+        routeClaudeLinks.state = config.routesClaudeLinks ? .on : .off; routeClaudeLinks.target = self; routeClaudeLinks.action = #selector(routeClaudeLinksChanged)
+        preference("Route Claude sign-in links", control: routeClaudeLinks, into: form)
+        offerClaudeUpdates.state = config.offersClaudeUpdates ? .on : .off; offerClaudeUpdates.target = self; offerClaudeUpdates.action = #selector(offerClaudeUpdatesChanged)
+        preference("Handle Claude updates", control: offerClaudeUpdates, into: form)
+        section("Notifications", into: form)
+        let settings = NSButton(title: "System settings…", target: self, action: #selector(openNotificationSettings)); settings.bezelStyle = .rounded
+        preference("macOS permission", control: settings, into: form)
+        notificationStatus.font = .systemFont(ofSize: 11); notificationStatus.textColor = .secondaryLabelColor
+        form.addArrangedSubview(notificationStatus)
+        form.addArrangedSubview(helpLabel("Configure manual-reset expiry notifications on each account's Display page."))
+    }
 
-        autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off
-        autoApproveCookies.toolTip = "Reads the encrypted cookie store for live usage. macOS asks to approve keychain access once (click \"Always Allow\"). Uncheck to never prompt; usage then updates only while Claude/ChatGPT is open."
-        autoApproveCookies.target = self
-        autoApproveCookies.action = #selector(cookiesChanged)
-        let cookiesHelp = helpLabel("Approve the keychain once (\"Always Allow\") instead of every launch. Uncheck to never prompt.")
+    @objc private func openNotificationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") { NSWorkspace.shared.open(url) }
+    }
 
-        autoUpdate.state = config.autoUpdates ? .on : .off
-        autoUpdate.toolTip = "Download new releases in the background and restart LLMCodeBar to apply them. Turn off to be offered the update in the menu instead."
-        autoUpdate.target = self
-        autoUpdate.action = #selector(autoUpdateChanged)
-
-        routeClaudeLinks.state = config.routesClaudeLinks ? .on : .off
-        routeClaudeLinks.toolTip = "Holds the claude:// link type so a sign-in returns to the window that started it. With two Claude windows open, macOS otherwise hands the sign-in to whichever it likes and it silently fails."
-        routeClaudeLinks.target = self
-        routeClaudeLinks.action = #selector(routeClaudeLinksChanged)
-        let routeHelp = helpLabel("Claude then signs in inside its own window instead of sending you to the browser.")
-
-        offerClaudeUpdates.state = config.offersClaudeUpdates ? .on : .off
-        offerClaudeUpdates.toolTip = "Claude installs an update by quitting a window once it's been idle for a while, and with more than one window open the install can't start, so that window just stays closed. With this on, LLMCodeBar opens it again straight away and offers a close-install-reopen that actually lands the update."
-        offerClaudeUpdates.target = self
-        offerClaudeUpdates.action = #selector(offerClaudeUpdatesChanged)
-        let claudeUpdateHelp = helpLabel("A window Claude closes for an update comes straight back, and nothing closes without your click.")
-
-        let versionLabel = NSTextField(labelWithString: "Version \(Updater.currentVersion)")
-        versionLabel.textColor = .secondaryLabelColor
-        checkForUpdatesButton.bezelStyle = .rounded
-        checkForUpdatesButton.controlSize = .small
-        checkForUpdatesButton.target = self
-        checkForUpdatesButton.action = #selector(checkForUpdatesNow)
-        let versionRow = NSStackView(views: [versionLabel, checkForUpdatesButton])
-        versionRow.orientation = .horizontal
-        versionRow.spacing = 8
-
-        form.addArrangedSubview(title)
-        form.addArrangedSubview(launchAtLogin)
-        form.addArrangedSubview(refreshRow)
-        form.addArrangedSubview(sectionHeading("Account access"))
-        form.addArrangedSubview(autoApproveCookies)
-        form.addArrangedSubview(cookiesHelp)
-        form.addArrangedSubview(sectionHeading("Updates"))
-        form.addArrangedSubview(autoUpdate)
-        form.addArrangedSubview(sectionHeading("Claude windows"))
-        form.addArrangedSubview(routeClaudeLinks)
-        form.addArrangedSubview(routeHelp)
-        form.addArrangedSubview(offerClaudeUpdates)
-        form.addArrangedSubview(claudeUpdateHelp)
-        form.addArrangedSubview(versionRow)
+    private func refreshNotificationPermission() {
+        guard Bundle.main.bundleIdentifier == "fr.fraserv.llmusagebar" else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                let text: String
+                switch settings.authorizationStatus {
+                case .authorized, .provisional, .ephemeral: text = "Notifications allowed by macOS."
+                case .denied: text = "Enable LLMCodeBar in System Settings → Notifications."
+                default: text = "Permission is requested when you enable an expiry notification."
+                }
+                self?.notificationStatus.stringValue = text
+                self?.accountNotificationStatus.stringValue = text
+            }
+        }
     }
 
     private func sectionHeading(_ text: String) -> NSTextField {
@@ -619,7 +591,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         showResets.state = (profile.showResetTimes ?? true) ? .on : .off
         showManualResets.state = (profile.showManualResets ?? true) ? .on : .off
         resetAlerts.selectItem(at: [0, 1, 6, 24, 72].firstIndex(of: profile.manualResetExpiryAlertHours ?? 0) ?? 0)
-        let accountControls = [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
+        let accountControls = [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
 
         labelField.stringValue = profile.label
@@ -630,7 +602,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         menuBarAccount.state = (config.menuBarProfileIDList.contains(profile.id) && config.showsPercentInMenuBar) ? .on : .off
         iconLabelField.stringValue = profile.menuBarLabel ?? ""
         iconLabelField.placeholderString = profile.defaultMenuBarLabel
-        iconLabelField.isEnabled = config.showsMenuBarLabels
+        iconLabelField.isEnabled = true
         iconLabelDefault.stringValue = config.showsMenuBarLabels
             ? (profile.defaultMenuBarLabel.isEmpty ? "No email yet" : "Empty = \(profile.defaultMenuBarLabel), the first 2 characters of the email")
             : "Turn on \"Show a label on each app icon\" below to use it"
@@ -649,24 +621,41 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             accountTitle.stringValue = "Connect \(profile.provider.rawValue)"
             accountSubtitle.stringValue = "Sign in when the window opens"
         } else {
-            accountTitle.stringValue = profile.accountEmail ?? profile.accountName ?? "\(profile.provider.rawValue) account"
-            accountSubtitle.stringValue = [profile.provider.displayName, profile.usage?.accountPlan ?? profile.accountPlan]
+            accountTitle.stringValue = "\(profile.provider.displayName) · \(profile.menuBarLabelText)"
+            accountSubtitle.stringValue = [profile.accountEmail ?? profile.accountName, profile.usage?.accountPlan ?? profile.accountPlan]
                 .compactMap { $0 }.joined(separator: "  ·  ")
         }
+        for view in manualInventory.arrangedSubviews { manualInventory.removeArrangedSubview(view); view.removeFromSuperview() }
+        if let inventory = profile.usage?.manualResets {
+            for group in inventory.allowances where group.unexpired(at: Date()) {
+                let dates = group.expiresAt.map { ManualResetInventory.dateText($0) } ?? "—"
+                let label = NSTextField(labelWithString: dates); label.textColor = .secondaryLabelColor; label.font = .systemFont(ofSize: 11)
+                let kind = NSTextField(labelWithString: "\(group.count) \(group.kind)")
+                kind.font = .systemFont(ofSize: 11)
+                let row = NSStackView(views: [kind, NSView(), label]); row.spacing = 8
+                manualInventory.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: manualInventory.widthAnchor).isActive = true
+                row.heightAnchor.constraint(greaterThanOrEqualToConstant: 18).isActive = true
+            }
+        }
+        if manualInventory.arrangedSubviews.isEmpty {
+            manualInventory.addArrangedSubview(helpLabel(profile.usage?.manualResets?.error != nil ? "Inventory unavailable" : "No manual resets available"))
+        }
+        resizeAccountSection()
         statusLabel.stringValue = ""
     }
 
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
+        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
         iconLabelField.stringValue = ""
         iconLabelDefault.stringValue = ""
         autoStartSession.state = .off
     }
 
-    @objc private func displayChanged() {
+    @objc private func displayChanged(_ sender: NSControl) {
         guard let id = selectedID else { return }
         let values = [showSparklines, showLabels, showSession, showWeeklyLimits, showResets].map { $0.state == .on }
         let hours = [0, 1, 6, 24, 72][max(0, resetAlerts.indexOfSelectedItem)]
@@ -681,7 +670,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             cfg.profiles[i].showManualResets = manual
             cfg.profiles[i].manualResetExpiryAlertHours = hours
         }
-        if hours > 0 { ResetReminder.requestAuthorization(profiles: config.profiles) }
+        if hours > 0, sender === resetAlerts, Bundle.main.bundleIdentifier == "fr.fraserv.llmusagebar" {
+            ResetReminder.requestAuthorization { [weak self] in
+                guard let self else { return }
+                ResetReminder.sync(self.config.profiles)
+                self.refreshNotificationPermission()
+            }
+        }
     }
 
     // MARK: Account actions
@@ -816,12 +811,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         statusLabel.stringValue = "Found \(config.profiles.count) connected account(s)."
     }
 
-    @objc private func toggleAdvanced() {
-        let show = advancedToggle.state == .on
-        advancedStack.isHidden = !show
-
-    }
-
     // MARK: General actions
 
     @objc private func launchAtLoginChanged() {
@@ -904,5 +893,21 @@ final class AppearanceAwareStack: NSStackView {
             layer?.borderColor = NSColor.separatorColor.cgColor
             layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         }
+    }
+}
+
+/// Native sidebar navigation, with the same quiet selected state as the approved mock.
+private final class SettingsNavigationButton: NSButton {
+    override var intrinsicContentSize: NSSize { NSSize(width: 160, height: 32) }
+    override func draw(_ dirtyRect: NSRect) {
+        if state == .on {
+            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        }
+        let text = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: state == .on ? NSColor.controlAccentColor : NSColor.labelColor,
+        ])
+        text.draw(at: NSPoint(x: 10, y: (bounds.height - text.size().height) / 2))
     }
 }

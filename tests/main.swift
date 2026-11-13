@@ -44,7 +44,21 @@ for quota in quotas {
     check(labels.last!.frame.width >= 61, "reset date has reserved width")
     check(labels.last!.frame.maxX <= quota.bounds.maxX + 3, "reset fits in row")
 }
-let settings = SettingsWindowController(config: AppConfig(launchAtLogin: false, profiles: [profile]), onChange: { _ in }, onCheckForUpdates: { _ in })
+profile.accountEmail = "personal95@example.com"
+profile.menuBarLabel = "95"
+profile.accountPlan = "Pro"
+profile.usage?.manualResets = ManualResetInventory(allowances: [
+    ManualResetAllowance(kind: "Fable", count: 1, expiresAt: Date().addingTimeInterval(4 * 86400), startsAt: nil),
+    ManualResetAllowance(kind: "Full", count: 1, expiresAt: Date().addingTimeInterval(27 * 86400), startsAt: nil)
+], fetchedAt: Date())
+var secondProfile = profile
+secondProfile.id = "second-account"
+secondProfile.accountEmail = "work97@example.com"
+secondProfile.menuBarLabel = "97"
+secondProfile.manualResetExpiryAlertHours = 6
+var editedConfig = AppConfig(launchAtLogin: false, profiles: [profile, secondProfile])
+editedConfig.menuBarRows = 1; editedConfig.menuBarColumns = 3; editedConfig.showMenuBarLabels = true
+let settings = SettingsWindowController(config: editedConfig, onChange: { mutate in mutate(&editedConfig) }, onCheckForUpdates: { _ in })
 settings.window!.contentView!.layoutSubtreeIfNeeded()
 check(settings.window!.frame.height < 700, "settings stays compact")
 let pages = descendants(settings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
@@ -54,12 +68,50 @@ pages.selectTabViewItem(at: 1)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
 let menuControls = descendants(pages.tabViewItems[1].view!)
 check(menuControls.contains { $0 is MenuBarGridPicker }, "menu-bar grid picker is preserved")
-check(menuControls.contains { ($0 as? NSButton)?.title == "Show a label on each app icon" }, "icon label toggle is preserved")
-check(menuControls.contains { ($0 as? NSButton)?.title == "Weekly %" }, "weekly menu-bar setting is preserved")
+check(menuControls.contains { $0.identifier?.rawValue == "showIconLabels" }, "icon label toggle is preserved")
+check(menuControls.contains { $0.identifier?.rawValue == "showWeekly" }, "weekly menu-bar setting is preserved")
 check(menuControls.compactMap { $0 as? NSPopUpButton }.contains { $0.itemTitles.contains("Side by side") }, "arrangement control is preserved")
 pages.selectTabViewItem(at: 2)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
-check(descendants(pages.tabViewItems[2].view!).contains { ($0 as? NSButton)?.title == "Show automatic reset times" }, "account reset toggle is preserved")
+check(descendants(pages.tabViewItems[2].view!).contains { $0.identifier?.rawValue == "showResets" }, "account reset toggle is preserved")
+let accountTable = descendants(settings.window!.contentView!).compactMap { $0 as? NSTableView }.first!
+accountTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+let accountView = pages.tabViewItems[2].view!
+let notificationPicker = descendants(accountView).compactMap { $0 as? NSPopUpButton }.first { $0.identifier?.rawValue == "resetAlerts" }!
+notificationPicker.selectItem(at: 3)
+_ = notificationPicker.target?.perform(notificationPicker.action!, with: notificationPicker)
+check(editedConfig.profiles[0].manualResetExpiryAlertHours == 24, "notification lead time saves for selected account")
+check(editedConfig.profiles[1].manualResetExpiryAlertHours == 6, "another account's notification setting is preserved")
+notificationPicker.selectItem(at: 0)
+_ = notificationPicker.target?.perform(notificationPicker.action!, with: notificationPicker)
+check(editedConfig.profiles[0].manualResetExpiryAlertHours == 0 && ResetReminder.plans(editedConfig.profiles[0]).isEmpty, "Off disables selected account notifications")
+check(editedConfig.menuBarGridRows == 1 && editedConfig.menuBarGridColumns == 3 && editedConfig.showsMenuBarLabels, "notification edits preserve restored menu-bar preferences")
+func snapshot(_ view: NSView, _ name: String) throws {
+    view.layoutSubtreeIfNeeded()
+    let folder = URL(fileURLWithPath: ".build/design-proof")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let composite = NSImage(size: view.bounds.size)
+        composite.lockFocus()
+        NSColor.windowBackgroundColor.setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: view.bounds.size)).fill()
+        let overlay = NSImage(size: view.bounds.size)
+        overlay.addRepresentation(bitmap)
+        overlay.draw(in: NSRect(origin: .zero, size: view.bounds.size), from: .zero, operation: .sourceOver, fraction: 1)
+        composite.unlockFocus()
+        if let tiff = composite.tiffRepresentation, let opaque = NSBitmapImageRep(data: tiff), let png = opaque.representation(using: .png, properties: [:]) {
+            try png.write(to: folder.appendingPathComponent(name + ".png"))
+        }
+    }
+}
+settings.window!.appearance = NSAppearance(named: .aqua)
+for index in 0...2 {
+    if index == 2 { accountTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+    pages.selectTabViewItem(at: index)
+    try snapshot(settings.window!.contentView!, ["general", "menu-bar", "account"][index])
+}
+
 var gridConfig = AppConfig(launchAtLogin: false, profiles: [profile])
 gridConfig.setMenuBarGrid(rows: 3, columns: 3)
 for i in 0..<9 { gridConfig.setMenuBar("account-\(i)", shown: true) }
@@ -115,6 +167,21 @@ let codexGrants: [String: Any] = ["credits": [
     ["reset_type": "codex_rate_limits", "status": "available", "expires_at": NSNull()]
 ]]
 check(ManualResets.codex(codexGrants, now: now)!.availableCount(at: now) == 2, "Codex banked-reset inventory is distinct from quota usage")
+let dateOnly = ManualResetInventory.dateText(ManualResets.date("2026-11-17T07:59:00Z")!, now: ManualResets.date("2026-11-13T12:00:00Z")!, locale: Locale(identifier: "fr_FR"))
+check(dateOnly.contains("17") && dateOnly.contains("nov") && !dateOnly.contains(":") && !dateOnly.contains("2026"), "manual reset dates omit hour and current year")
+let chipView = ManualResetView(inventory: grants)
+check(chipView.intrinsicContentSize.height < 65, "inline reset chips remain compact")
+let chipTexts = descendants(chipView).compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
+check(chipTexts.contains("Fable ×2") && chipTexts.contains("Full ×1") && !chipTexts.contains("expires"), "chips show type and count without expiry boilerplate")
+try snapshot(chipView, "manual-resets")
+let threeResets = ManualResetInventory(allowances: (1...3).map {
+    ManualResetAllowance(kind: "Full", count: 1, expiresAt: now.addingTimeInterval(Double($0 * 86400)), startsAt: nil)
+}, fetchedAt: now)
+let threeView = ManualResetView(inventory: threeResets)
+let threeText = descendants(threeView).compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
+check(threeText.contains("Full ×3"), "multiple full resets share one inline chip")
+for grant in threeResets.allowances { check(threeText.contains(ManualResetInventory.dateText(grant.expiresAt!)), "every grouped reset deadline stays visible") }
+
 profile.usage?.manualResets = grants
 profile.manualResetExpiryAlertHours = 24
 let plans = ResetReminder.plans(profile, now: now)
