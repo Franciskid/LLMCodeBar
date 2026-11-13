@@ -24,6 +24,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let advancedToggle = NSButton()
     private let advancedStack = NSStackView()
 
+    private let accountPage = NSStackView()
+    private let generalPage = NSStackView()
+    private let pagePicker = NSSegmentedControl(labels: ["General", "Account"], trackingMode: .selectOne, target: nil, action: nil)
+    private let showLabels = NSButton(checkboxWithTitle: "Show limit labels and percentages", target: nil, action: nil)
+    private let showSession = NSButton(checkboxWithTitle: "Show session (5 hour) limit", target: nil, action: nil)
+    private let showWeekly = NSButton(checkboxWithTitle: "Show weekly (7 day) limits", target: nil, action: nil)
+    private let showResets = NSButton(checkboxWithTitle: "Show reset times", target: nil, action: nil)
+    private let resetAlerts = NSPopUpButton()
+
     // App-wide (General) controls.
     private let launchAtLogin = NSButton(checkboxWithTitle: "Launch LLMCodeBar at login", target: nil, action: nil)
     private let refreshIntervalPopup = NSPopUpButton()
@@ -47,8 +56,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.onChange = onChange
         self.onCheckForUpdates = onCheckForUpdates
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 610),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
         window.title = "LLMCodeBar Settings"
@@ -56,6 +65,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         super.init(window: window)
         buildUI()
         loadSelection()
+        pagePicker.selectedSegment = 0
+        pageChanged()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -78,7 +89,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         return cell
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection() }
+    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection(); pagePicker.selectedSegment = 1; pageChanged() }
 
     // MARK: Immediate apply
 
@@ -155,9 +166,19 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.spacing = 10
         form.alignment = .leading
 
-        buildAccountSection(into: form)
-        form.addArrangedSubview(divider())
-        buildGeneralSection(into: form)
+        pagePicker.selectedSegment = 0
+        pagePicker.target = self
+        pagePicker.action = #selector(pageChanged)
+        form.addArrangedSubview(pagePicker)
+        for page in [accountPage, generalPage] {
+            page.orientation = .vertical
+            page.alignment = .leading
+            page.spacing = 10
+            form.addArrangedSubview(page)
+        }
+        buildAccountSection(into: accountPage)
+        buildGeneralSection(into: generalPage)
+        pageChanged()
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 11)
@@ -170,26 +191,29 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(statusLabel)
 
         content.addSubview(leftPane)
-        content.addSubview(form)
+        let formScroll = NSScrollView()
+        formScroll.translatesAutoresizingMaskIntoConstraints = false
+        formScroll.hasVerticalScroller = true
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(form)
+        formScroll.documentView = document
+        content.addSubview(formScroll)
         NSLayoutConstraint.activate([
             leftPane.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             leftPane.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
             leftPane.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
             leftPane.widthAnchor.constraint(equalToConstant: 220),
-            form.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
-            form.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            form.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
-            form.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -16),
+            formScroll.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
+            formScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            formScroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            formScroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            document.widthAnchor.constraint(equalTo: formScroll.contentView.widthAnchor),
+            form.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            form.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            form.topAnchor.constraint(equalTo: document.topAnchor),
+            form.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12),
         ])
-        // The General section has outgrown the original 500pt, which left the version row
-        // below the bottom edge - size the window to whatever the form needs.
-        content.layoutSubtreeIfNeeded()
-        let needed = form.fittingSize.height + 18 + 16
-        if needed > content.frame.height {
-            window?.setContentSize(NSSize(width: content.frame.width, height: needed))
-            window?.center()
-        }
-
         if !config.profiles.isEmpty {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
@@ -247,6 +271,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(header)
         form.setCustomSpacing(12, after: header)
         form.addArrangedSubview(menuBarAccount)
+        for control in [showSparklines, showLabels, showSession, showWeekly, showResets] {
+            control.target = self
+            control.action = #selector(displayChanged)
+            form.addArrangedSubview(control)
+        }
+        resetAlerts.addItems(withTitles: ["Off", "5 minutes before", "15 minutes before", "30 minutes before", "1 hour before"])
+        resetAlerts.target = self
+        resetAlerts.action = #selector(displayChanged)
+        let alertRow = NSStackView(views: [NSTextField(labelWithString: "Reset reminder"), resetAlerts])
+        alertRow.spacing = 8
+        form.addArrangedSubview(alertRow)
         form.addArrangedSubview(autoStartRow)
         form.addArrangedSubview(autoStartHelp)
         form.addArrangedSubview(advancedHeader)
@@ -274,10 +309,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         refreshRow.orientation = .horizontal
         refreshRow.spacing = 8
         refreshIntervalPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-
-        showSparklines.state = config.showsSparklines ? .on : .off
-        showSparklines.target = self
-        showSparklines.action = #selector(sparklinesChanged)
 
         autoApproveCookies.state = config.allowsCookieKeychain ? .on : .off
         autoApproveCookies.toolTip = "Reads the encrypted cookie store for live usage. macOS asks to approve keychain access once (click \"Always Allow\"). Uncheck to never prompt; usage then updates only while Claude/ChatGPT is open."
@@ -312,11 +343,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         versionRow.orientation = .horizontal
         versionRow.spacing = 8
 
-        form.setCustomSpacing(12, after: form.arrangedSubviews.last!)
         form.addArrangedSubview(title)
         form.addArrangedSubview(launchAtLogin)
         form.addArrangedSubview(refreshRow)
-        form.addArrangedSubview(showSparklines)
         form.addArrangedSubview(autoApproveCookies)
         form.addArrangedSubview(cookiesHelp)
         form.addArrangedSubview(autoUpdate)
@@ -366,7 +395,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             return
         }
         let profile = config.profiles[row]
-        let accountControls = [menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
+        showSparklines.state = (profile.showSparklines ?? config.showsSparklines) ? .on : .off
+        showLabels.state = (profile.showLabels ?? true) ? .on : .off
+        showSession.state = (profile.showSessionWindow ?? true) ? .on : .off
+        showWeekly.state = (profile.showWeeklyWindows ?? true) ? .on : .off
+        showResets.state = (profile.showResetTimes ?? true) ? .on : .off
+        resetAlerts.selectItem(at: [0, 5, 15, 30, 60].firstIndex(of: profile.resetAlertMinutes ?? 0) ?? 0)
+        let accountControls = [showSparklines, showLabels, showSession, showWeekly, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
 
         labelField.stringValue = profile.label
@@ -400,9 +435,30 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField].forEach { $0.isEnabled = false }
+        [showSparklines, showLabels, showSession, showWeekly, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
         autoStartSession.state = .off
+    }
+
+    @objc private func pageChanged() {
+        accountPage.isHidden = pagePicker.selectedSegment == 0
+        generalPage.isHidden = pagePicker.selectedSegment != 0
+    }
+
+    @objc private func displayChanged() {
+        guard let id = selectedID else { return }
+        let values = [showSparklines, showLabels, showSession, showWeekly, showResets].map { $0.state == .on }
+        let minutes = [0, 5, 15, 30, 60][max(0, resetAlerts.indexOfSelectedItem)]
+        commit { cfg in
+            guard let i = cfg.profiles.firstIndex(where: { $0.id == id }) else { return }
+            cfg.profiles[i].showSparklines = values[0]
+            cfg.profiles[i].showLabels = values[1]
+            cfg.profiles[i].showSessionWindow = values[2]
+            cfg.profiles[i].showWeeklyWindows = values[3]
+            cfg.profiles[i].showResetTimes = values[4]
+            cfg.profiles[i].resetAlertMinutes = minutes
+        }
+        if minutes > 0 { ResetReminder.requestAuthorization(profiles: config.profiles) }
     }
 
     // MARK: Account actions
@@ -531,12 +587,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func toggleAdvanced() {
         let show = advancedToggle.state == .on
         advancedStack.isHidden = !show
-        guard let window = window else { return }
-        let delta: CGFloat = 140
-        var frame = window.frame
-        frame.size.height += show ? delta : -delta
-        frame.origin.y -= show ? delta : -delta
-        window.setFrame(frame, display: true, animate: true)
+
     }
 
     // MARK: General actions
@@ -551,11 +602,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         guard refreshOptions.indices.contains(index) else { return }
         let seconds = refreshOptions[index].seconds
         commit { $0.refreshIntervalSeconds = seconds }
-    }
-
-    @objc private func sparklinesChanged() {
-        let on = showSparklines.state == .on
-        commit { $0.showSparklines = on }
     }
 
     @objc private func cookiesChanged() {

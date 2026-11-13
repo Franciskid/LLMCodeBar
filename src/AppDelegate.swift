@@ -1,6 +1,7 @@
 import AppKit
+import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private var config = ConfigStore.shared.loadCached()
     private var settingsWindow: SettingsWindowController?
@@ -30,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var reopenedClosings: [String: TimeInterval] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         rebuildMenu()
@@ -37,6 +39,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduleRefreshTimer()
         scheduleUpdateChecks()
         watchClaudeInstances()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 
     // MARK: claude:// links
@@ -145,11 +152,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
 
-        // Only worth offering when there's somewhere to move things to: a second Claude
-        // account, or Claude and ChatGPT side by side.
+        // A single account is enough to receive a local T3 conversation.
         let signedIn = config.profiles.filter { $0.isPendingLogin != true }
-        let claudeCount = signedIn.filter { $0.provider == .claude }.count
-        if claudeCount >= 2 || (claudeCount >= 1 && signedIn.contains { $0.provider == .codex }) {
+        if !signedIn.isEmpty {
             let transfer = NSMenuItem(title: "Transfer session...", action: #selector(showTransfer), keyEquivalent: "t")
             transfer.target = self
             transfer.isEnabled = true
@@ -352,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 mutate(&self.config)
                 ConfigStore.shared.save(self.config)
+                ResetReminder.sync(self.config.profiles)
                 self.scheduleRefreshTimer()
                 self.updateStatusIcon()
                 self.rebuildMenu()
@@ -376,7 +382,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let loaded = ConfigStore.shared.load()
             let refreshed = UsageRefresher.refresh(loaded)
-            ConfigStore.shared.save(refreshed)
             UsageHistoryStore.shared.record(profiles: refreshed.profiles)
             // Keep every account's Code history present in every Claude window, so a
             // sign-in landing in a different window than usual never hides it.
@@ -389,7 +394,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.config = refreshed
+                // A network request can finish after an edit in Settings. Merge readings
+                // into the live preferences so a slow refresh cannot undo that edit.
+                var merged = self.config
+                let removedIDs = Set(loaded.profiles.map(\.id)).subtracting(self.config.profiles.map(\.id))
+                merged.profiles = refreshed.profiles.filter { !removedIDs.contains($0.id) }.map { reading in
+                    guard let live = self.config.profiles.first(where: { $0.id == reading.id }) else { return reading }
+                    var profile = reading
+                    profile.showSparklines = live.showSparklines
+                    profile.showLabels = live.showLabels
+                    profile.showSessionWindow = live.showSessionWindow
+                    profile.showWeeklyWindows = live.showWeeklyWindows
+                    profile.showResetTimes = live.showResetTimes
+                    profile.resetAlertMinutes = live.resetAlertMinutes
+                    profile.autoStartSession = live.autoStartSession
+                    return profile
+                }
+                merged.profiles += self.config.profiles.filter { live in !merged.profiles.contains { $0.id == live.id } }
+                self.config = merged
+                ConfigStore.shared.save(merged)
+                ResetReminder.sync(merged.profiles)
                 self.refreshInFlight = false
                 self.noteRestoredSessions(restored)
                 self.refreshClaudeUpdatePlan()

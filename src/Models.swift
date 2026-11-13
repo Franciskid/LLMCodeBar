@@ -141,6 +141,19 @@ struct LaunchProfile: Codable, Identifiable {
     var previousAccountUUID: String?
     var accountChangedAt: Date?
 
+    var showSparklines: Bool?
+    var showLabels: Bool?
+    var showSessionWindow: Bool?
+    var showWeeklyWindows: Bool?
+    var showResetTimes: Bool?
+    var resetAlertMinutes: Int?
+
+    func visibleWindows() -> [UsageWindow] {
+        (usage?.windows ?? []).filter {
+            $0.title == "5h" ? (showSessionWindow ?? true) : (showWeeklyWindows ?? true)
+        }
+    }
+
     var autoStartsSession: Bool { autoStartSession ?? false }
 
     static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity, isUserAdded: Bool = false) -> LaunchProfile {

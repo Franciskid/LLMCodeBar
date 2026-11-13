@@ -268,7 +268,7 @@ final class SparklineView: NSView {
 }
 
 final class QuotaWindowView: NSView {
-    init(window: UsageWindow, history: [Double] = [], showSparkline: Bool = false) {
+    init(window: UsageWindow, history: [Double] = [], showSparkline: Bool = false, showLabels: Bool = true, showResets: Bool = true) {
         super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 30))
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -282,7 +282,7 @@ final class QuotaWindowView: NSView {
         used.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         used.textColor = .secondaryLabelColor
 
-        let reset = NSTextField(labelWithString: ProfileFormatting.resetText(for: window))
+        let reset = NSTextField(labelWithString: "Resets " + ProfileFormatting.resetText(for: window))
         reset.translatesAutoresizingMaskIntoConstraints = false
         reset.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
         reset.textColor = .secondaryLabelColor
@@ -293,6 +293,11 @@ final class QuotaWindowView: NSView {
         bar.usedPercent = window.usedPercent
         bar.accentColor = Self.color(for: window.usedPercent)
 
+        title.isHidden = !showLabels
+        used.isHidden = !showLabels
+        reset.isHidden = !showResets
+        reset.toolTip = window.resetsAt.map { "Resets " + DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .short) }
+        reset.setContentCompressionResistancePriority(showResets ? .required : .defaultLow, for: .horizontal)
         addSubview(title)
         addSubview(used)
         addSubview(bar)
@@ -313,7 +318,7 @@ final class QuotaWindowView: NSView {
 
             reset.trailingAnchor.constraint(equalTo: trailingAnchor),
             reset.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            reset.widthAnchor.constraint(equalToConstant: 62),
+            reset.widthAnchor.constraint(equalToConstant: showResets ? 120 : 0),
         ]
 
         if showSparkline, history.count >= 2 {
@@ -361,7 +366,8 @@ final class ProfileMenuItemView: NSView {
         self.profileID = profile.id
         self.actionTarget = target
         self.action = action
-        let windowCount = max(1, min(2, profile.usage?.windows.count ?? 0))
+        let showSparklines = profile.showSparklines ?? showSparklines
+        let windowCount = max(1, profile.visibleWindows().count)
         let rowHeight = showSparklines ? 52 : 35
         // The pin and auto-start line only make sense for an account that's signed in.
         let showsControls = inMenuBar != nil && profile.isPendingLogin != true
@@ -418,12 +424,12 @@ final class ProfileMenuItemView: NSView {
         statusStack.setHuggingPriority(.required, for: .horizontal)
 
         let quotaViews: [NSView]
-        if let windows = profile.usage?.windows, !windows.isEmpty {
-            quotaViews = windows.prefix(2).map { window in
+        if profile.usage?.windows.isEmpty == false {
+            quotaViews = profile.visibleWindows().map { window in
                 let series = showSparklines
                     ? UsageHistoryStore.shared.series(profileID: profile.id, window: window.title)
                     : []
-                return QuotaWindowView(window: window, history: series, showSparkline: showSparklines)
+                return QuotaWindowView(window: window, history: series, showSparkline: showSparklines, showLabels: profile.showLabels ?? true, showResets: profile.showResetTimes ?? true)
             }
         } else {
             let label = NSTextField(labelWithString: ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).first ?? "Usage unavailable")
