@@ -37,6 +37,7 @@ struct UsageWindow: Codable {
     private static let shortResetFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter
     }()
 }

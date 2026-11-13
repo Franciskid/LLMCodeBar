@@ -113,30 +113,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         } else {
             let runningIDs = RunningProfileDetector.runningProfileIDs(config.profiles)
             let menuBarIDs = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
-            let rows = config.profiles.map { profile in
-                ProfileMenuItemView(
-                    profile: profile,
-                    target: self,
-                    action: #selector(openProfileButton(_:)),
-                    isRefreshing: refreshInFlight,
-                    isRunning: runningIDs.contains(profile.id),
-                    showSparklines: config.showsSparklines,
-                    warning: warning(for: profile),
-                    inMenuBar: menuBarIDs.contains(profile.id),
-                    onMenuBarToggle: { [weak self] id, on in self?.setMenuBar(id, shown: on) })
+            // Grouped by app, each group under its name, in the order the accounts are
+            // listed within it.
+            var rows: [ProfileMenuItemView] = []
+            var views: [NSView] = []
+            for provider in Provider.allCases {
+                let group = config.profiles.filter { $0.provider == provider }
+                guard !group.isEmpty else { continue }
+                views.append(ProviderHeaderView(title: provider.displayName))
+                for profile in group {
+                    let row = ProfileMenuItemView(
+                        profile: profile,
+                        target: self,
+                        action: #selector(openProfileButton(_:)),
+                        isRefreshing: refreshInFlight,
+                        isRunning: runningIDs.contains(profile.id),
+                        showSparklines: config.showsSparklines,
+                        warning: warning(for: profile),
+                        inMenuBar: menuBarIDs.contains(profile.id),
+                        onMenuBarToggle: { [weak self] id, on in self?.setMenuBar(id, shown: on) })
+                    rows.append(row)
+                    views.append(row)
+                }
             }
             menuRows = rows
 
             if rows.count > Self.maxVisibleAccounts {
-                // Cap the account list at maxVisibleAccounts rows tall; the rest scroll,
+                // Cap the account list at maxVisibleAccounts cards tall; the rest scroll,
                 // so many accounts never grow the menu past a comfortable height.
                 let item = NSMenuItem()
-                item.view = Self.makeScrollingAccountsView(rows: rows, visibleCount: Self.maxVisibleAccounts)
+                item.view = Self.makeScrollingAccountsView(views: views, visibleCards: Self.maxVisibleAccounts)
                 menu.addItem(item)
             } else {
-                for row in rows {
+                for view in views {
                     let item = NSMenuItem()
-                    item.view = row
+                    item.view = view
                     menu.addItem(item)
                 }
             }
@@ -244,11 +255,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Above this many accounts, the list becomes a fixed-height scroll region.
     private static let maxVisibleAccounts = 3
 
-    /// Packs the account rows into a scroll view capped at the height of the first
-    /// `visibleCount` rows, so the menu shows that many at full size and scrolls the rest.
-    private static func makeScrollingAccountsView(rows: [ProfileMenuItemView], visibleCount: Int) -> NSView {
+    /// Packs the app headings and account cards into a scroll view capped at the height
+    /// of the first `visibleCards` cards (with their headings), so the menu shows that
+    /// many at full size and scrolls the rest.
+    private static func makeScrollingAccountsView(views rows: [NSView], visibleCards: Int) -> NSView {
         let rowWidth: CGFloat = 320
-        let visibleHeight = rows.prefix(visibleCount).reduce(CGFloat(0)) { $0 + $1.frame.height }
+        var visibleHeight: CGFloat = 0, cards = 0
+        for row in rows where cards < visibleCards {
+            visibleHeight += row.frame.height
+            if row is ProfileMenuItemView { cards += 1 }
+        }
 
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical

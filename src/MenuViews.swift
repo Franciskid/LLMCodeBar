@@ -518,83 +518,147 @@ final class SparklineView: NSView {
     }
 }
 
+/// One limit on one line: its short name, the bar, how much is used and when it resets.
+/// A used-up limit says when it's back instead, in red. With graphs on, its recent
+/// history sits under the bar.
 final class QuotaWindowView: NSView {
+    static let labelFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+    /// The line alone, or the line with its graph under it.
+    static func height(showSparkline: Bool) -> CGFloat { showSparkline ? 35 : 18 }
+
     private let contentHeight: CGFloat
-    override var intrinsicContentSize: NSSize { NSSize(width: 288, height: contentHeight) }
-    init(window: UsageWindow, history: [Double] = [], showSparkline: Bool = false, showLabels: Bool = true, showResets: Bool = true) {
-        contentHeight = showSparkline && history.count >= 2 ? 46 : 29
-        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: contentHeight))
-        heightAnchor.constraint(equalToConstant: contentHeight).isActive = true
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: contentHeight) }
+
+    init(window: UsageWindow, history: [Double] = [], showSparkline: Bool = false, showLabels: Bool = true, showResets: Bool = true, labelWidth: CGFloat = 18) {
+        let graph = showSparkline && history.count >= 2
+        contentHeight = Self.height(showSparkline: graph)
+        super.init(frame: NSRect(x: 0, y: 0, width: 288, height: contentHeight))
         translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: contentHeight).isActive = true
 
-        let title = NSTextField(labelWithString: ProfileFormatting.windowTitle(window.title))
-        title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        title.textColor = .labelColor
-
-        let used = NSTextField(labelWithString: ProfileFormatting.usedText(for: window))
-        used.translatesAutoresizingMaskIntoConstraints = false
-        used.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        used.textColor = .secondaryLabelColor
-
-        let reset = NSTextField(labelWithString: ProfileFormatting.resetText(for: window))
-        reset.translatesAutoresizingMaskIntoConstraints = false
-        reset.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
-        reset.textColor = .secondaryLabelColor
-        reset.alignment = .right
+        let line = NSLayoutGuide()
+        addLayoutGuide(line)
+        var constraints: [NSLayoutConstraint] = [
+            line.topAnchor.constraint(equalTo: topAnchor),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor),
+            line.heightAnchor.constraint(equalToConstant: 18),
+        ]
 
         let bar = UsageBarView()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.usedPercent = window.usedPercent
         bar.accentColor = Self.color(for: window.usedPercent)
-
-        title.isHidden = !showLabels
-        used.isHidden = !showLabels
-        reset.isHidden = !showResets
-        addSubview(title)
-        addSubview(used)
         addSubview(bar)
-        addSubview(reset)
-
-        var constraints: [NSLayoutConstraint] = [
-            title.leadingAnchor.constraint(equalTo: leadingAnchor),
-            title.topAnchor.constraint(equalTo: topAnchor),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: used.leadingAnchor, constant: -8),
-
-            used.trailingAnchor.constraint(equalTo: trailingAnchor),
-            used.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
-
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: reset.leadingAnchor, constant: -10),
-            bar.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
-            bar.heightAnchor.constraint(equalToConstant: 7),
-
-            reset.trailingAnchor.constraint(equalTo: trailingAnchor),
-            reset.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            reset.widthAnchor.constraint(equalToConstant: showResets ? 62 : 0),
+        constraints += [
+            bar.centerYAnchor.constraint(equalTo: line.centerYAnchor, constant: 0.5),
+            bar.heightAnchor.constraint(equalToConstant: 6),
         ]
 
-        if showSparkline, history.count >= 2 {
+        if showLabels {
+            let title = Self.label(Self.shortTitle(window.title), font: Self.labelFont, color: .secondaryLabelColor)
+            title.toolTip = "\(ProfileFormatting.windowTitle(window.title)) limit"
+            addSubview(title)
+            constraints += [
+                title.leadingAnchor.constraint(equalTo: leadingAnchor),
+                title.centerYAnchor.constraint(equalTo: line.centerYAnchor),
+                title.widthAnchor.constraint(equalToConstant: labelWidth),
+                bar.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 6),
+            ]
+        } else {
+            constraints.append(bar.leadingAnchor.constraint(equalTo: leadingAnchor))
+        }
+
+        // Right to left: the reset time, then the percentage, then the bar takes the rest.
+        // The reset time is added last, so it reads last.
+        var lastViews: [NSView] = []
+        var trailingEdge = trailingAnchor
+        var gap: CGFloat = 0
+        let back = ProfileFormatting.isUsedUp(window) ? window.resetsAt.flatMap { $0 > Date() ? $0 : nil } : nil
+        if let back {
+            // "Back in 52 min" takes the percentage's room too, and shows even with
+            // reset times off: it's the one thing worth knowing about this limit.
+            let reset = Self.label("Back \(ProfileFormatting.backIn(back))", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold), color: .systemRed)
+            reset.alignment = .right
+            addSubview(reset)
+            constraints += [
+                reset.trailingAnchor.constraint(equalTo: trailingAnchor),
+                reset.centerYAnchor.constraint(equalTo: line.centerYAnchor),
+            ]
+            trailingEdge = reset.leadingAnchor
+            gap = 10
+        } else {
+            if showResets {
+                let reset = Self.label(ProfileFormatting.resetText(for: window), font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), color: .secondaryLabelColor)
+                reset.alignment = .right
+                lastViews.append(reset)
+                constraints += [
+                    reset.trailingAnchor.constraint(equalTo: trailingAnchor),
+                    reset.centerYAnchor.constraint(equalTo: line.centerYAnchor),
+                    reset.widthAnchor.constraint(greaterThanOrEqualToConstant: 62),
+                ]
+                trailingEdge = reset.leadingAnchor
+                gap = 6
+            }
+            if showLabels {
+                let percent = Self.label("\(Int(window.usedPercent.rounded()))%", font: .monospacedDigitSystemFont(ofSize: 12, weight: .medium), color: .labelColor)
+                percent.alignment = .right
+                addSubview(percent)
+                constraints += [
+                    percent.trailingAnchor.constraint(equalTo: trailingEdge, constant: -gap),
+                    percent.centerYAnchor.constraint(equalTo: line.centerYAnchor),
+                    percent.widthAnchor.constraint(greaterThanOrEqualToConstant: 34),
+                ]
+                trailingEdge = percent.leadingAnchor
+                gap = 6
+            }
+        }
+        constraints.append(bar.trailingAnchor.constraint(equalTo: trailingEdge, constant: -gap))
+        lastViews.forEach(addSubview)
+
+        if graph {
             let spark = SparklineView(values: history)
             addSubview(spark)
             constraints += [
-                spark.leadingAnchor.constraint(equalTo: leadingAnchor),
+                spark.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
                 spark.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-                spark.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4),
+                spark.topAnchor.constraint(equalTo: line.bottomAnchor, constant: 3),
                 spark.heightAnchor.constraint(equalToConstant: 14),
-                spark.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
             ]
-        } else {
-            constraints.append(bar.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor))
         }
-
         NSLayoutConstraint.activate(constraints)
     }
 
-    private static func color(for usedPercent: Double) -> NSColor {
-        if usedPercent >= 90 { return .systemRed }
-        if usedPercent >= 70 { return .systemOrange }
+    /// Short, so the bar gets the room: the tooltip says which limit it is.
+    static func shortTitle(_ title: String) -> String {
+        switch title {
+        case "5h": return "5h"
+        case "Week": return "7d"
+        default: return ProfileFormatting.windowTitle(title)
+        }
+    }
+
+    /// The width every row's label gets, so the bars of one account line up.
+    static func labelWidth(for windows: [UsageWindow]) -> CGFloat {
+        max(16, windows.map {
+            ceil((shortTitle($0.title) as NSString).size(withAttributes: [.font: labelFont]).width)
+        }.max() ?? 0)
+    }
+
+    /// Green until 90%, amber from there, red once it's used up.
+    static func color(for usedPercent: Double) -> NSColor {
+        if usedPercent >= 99.5 { return .systemRed }
+        if usedPercent >= 90 { return .systemOrange }
         return .systemGreen
+    }
+
+    private static func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = font
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        return label
     }
 
     required init?(coder: NSCoder) {
@@ -602,6 +666,29 @@ final class QuotaWindowView: NSView {
     }
 }
 
+/// "CLAUDE", "CHATGPT": heads each app's accounts in the menu.
+final class ProviderHeaderView: NSView {
+    init(title: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let label = NSTextField(labelWithString: title.uppercased())
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+}
+
+/// One account in the menu: a header line (app icon, account, plan, auto-start, open or
+/// not, menu bar pin), one line per limit, and a line of manual resets when it has any.
+/// Clicking it opens the account's window.
 final class ProfileMenuItemView: NSView {
     private let profileID: String
     private weak var actionTarget: AnyObject?
@@ -620,139 +707,153 @@ final class ProfileMenuItemView: NSView {
         self.actionTarget = target
         self.action = action
         let showSparklines = profile.showSparklines ?? showSparklines
-        let windowCount = max(1, profile.visibleWindows().count)
-        // The pin and auto-start line only make sense for an account that's signed in.
+        let hasUsage = profile.usage?.windows.isEmpty == false
+        let windows = hasUsage ? profile.visibleWindows() : []
+        // The pin only makes sense for an account that's signed in.
         let showsControls = inMenuBar != nil && profile.isPendingLogin != true
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: CGFloat(300 + windowCount * 52)))
+
+        // A line under the header only when something is wrong.
+        var alert: String?
+        if let warning {
+            alert = "⚠︎ \(warning)"
+        } else if profile.usageStale == true {
+            alert = "Last updated \(ProfileFormatting.updatedAgo(for: profile))"
+        }
+
+        let labelWidth = QuotaWindowView.labelWidth(for: windows)
+        var rows: [NSView] = windows.map { window in
+            let series = showSparklines ? UsageHistoryStore.shared.series(profileID: profile.id, window: window.title) : []
+            return QuotaWindowView(window: window, history: series, showSparkline: showSparklines,
+                                   showLabels: profile.showLabels ?? true, showResets: profile.showResetTimes ?? true,
+                                   labelWidth: labelWidth)
+        }
+        if !hasUsage {
+            let label = NSTextField(labelWithString: ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).first ?? "Usage unavailable")
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.font = .systemFont(ofSize: 12)
+            label.textColor = .secondaryLabelColor
+            label.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            rows = [label]
+        }
+        let rowHeights = rows.map { ($0 as? QuotaWindowView)?.intrinsicContentSize.height ?? 16 }
+        var bodyHeight = rowHeights.reduce(0, +) + CGFloat(max(0, rows.count - 1)) * 4
+
+        // Manual resets, indented to where the bars start.
+        let resetsIndent: CGFloat = (profile.showLabels ?? true) && !windows.isEmpty ? labelWidth + 6 : 0
+        var resets: ManualResetView?
+        if profile.showManualResets ?? true {
+            let view = ManualResetView(inventory: profile.usage?.manualResets, width: 288, indent: resetsIndent)
+            if !view.isEmpty {
+                resets = view
+                bodyHeight += (rows.isEmpty ? 0 : 5) + view.intrinsicContentSize.height
+            }
+        }
+
+        let headerBottom: CGFloat = 29
+        let bodyTop = headerBottom + (alert == nil ? 7 : 2 + 15 + 6)
+        let height = bodyTop + bodyHeight + 10
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: height))
         identifier = NSUserInterfaceItemIdentifier(profileID)
         wantsLayer = true
 
         let appIcon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
-        appIcon.size = NSSize(width: 28, height: 28)
+        appIcon.size = NSSize(width: 18, height: 18)
         let icon = NSImageView(image: appIcon)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
 
-        let title = NSTextField(labelWithString: ProfileFormatting.title(for: profile))
-        title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = .systemFont(ofSize: 13.5, weight: .semibold)
-        title.lineBreakMode = .byTruncatingMiddle
+        // The part of the address before the @ reads as the account's name; the heading
+        // above already says which app.
+        let fullTitle = ProfileFormatting.title(for: profile)
+        let shortName = profile.accountEmail == nil ? fullTitle : String(fullTitle.split(separator: "@").first ?? Substring(fullTitle))
+        let name = NSTextField(labelWithString: shortName)
+        name.translatesAutoresizingMaskIntoConstraints = false
+        name.font = .systemFont(ofSize: 13, weight: .semibold)
+        name.lineBreakMode = .byTruncatingMiddle
+        name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        name.toolTip = fullTitle
 
-        var subtitleText = ProfileFormatting.subtitle(for: profile)
-        if profile.usageStale == true {
-            subtitleText += "  ·  stale · \(ProfileFormatting.updatedAgo(for: profile))"
-        }
-        if let warning {
-            subtitleText = "⚠︎ \(warning)"
-        }
-        let subtitle = NSTextField(labelWithString: subtitleText)
-        subtitle.translatesAutoresizingMaskIntoConstraints = false
-        subtitle.font = .systemFont(ofSize: 11.5, weight: .medium)
-        subtitle.textColor = (profile.usageStale == true || warning != nil) ? .systemOrange : .secondaryLabelColor
-        subtitle.lineBreakMode = .byTruncatingTail
+        let plan = NSTextField(labelWithString: profile.usage?.accountPlan ?? profile.accountPlan ?? "")
+        plan.translatesAutoresizingMaskIntoConstraints = false
+        plan.font = .systemFont(ofSize: 12)
+        plan.textColor = .secondaryLabelColor
+        plan.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        var trailing: [NSView] = []
+        if showsControls, profile.autoStartsSession {
+            let bolt = NSImageView(image: NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Auto-start") ?? NSImage())
+            bolt.contentTintColor = .secondaryLabelColor
+            bolt.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+            bolt.toolTip = "Starts its 5h session automatically. Change it in Settings."
+            trailing.append(bolt)
+        }
         let dot = StatusDotView()
         dot.translatesAutoresizingMaskIntoConstraints = false
         dot.isRunning = isRunning
-
-        let running = NSTextField(labelWithString: isRunning ? "Open" : "Closed")
-        running.translatesAutoresizingMaskIntoConstraints = false
-        running.font = .systemFont(ofSize: 10.5, weight: .medium)
-        running.textColor = isRunning ? .systemGreen : .tertiaryLabelColor
-
-        var statusViews: [NSView] = [dot, running]
+        dot.toolTip = isRunning ? "Its window is open" : "Its window is closed"
+        trailing.append(dot)
         if showsControls {
             let pin = MenuBarPinView(isOn: inMenuBar ?? false)
             let id = profile.id
             pin.onToggle = { on in onMenuBarToggle?(id, on) }
             menuBarPin = pin
-            statusViews.append(pin)
+            trailing.append(pin)
         }
-        let statusStack = NSStackView(views: statusViews)
-        statusStack.translatesAutoresizingMaskIntoConstraints = false
-        statusStack.orientation = .horizontal
-        statusStack.spacing = 5
-        statusStack.alignment = .centerY
-        statusStack.setHuggingPriority(.required, for: .horizontal)
+        let trailingStack = NSStackView(views: trailing)
+        trailingStack.translatesAutoresizingMaskIntoConstraints = false
+        trailingStack.orientation = .horizontal
+        trailingStack.spacing = 7
+        trailingStack.alignment = .centerY
+        trailingStack.setHuggingPriority(.required, for: .horizontal)
 
-        var quotaViews: [NSView]
-        if profile.usage?.windows.isEmpty == false {
-            quotaViews = profile.visibleWindows().map { window in
-                let series = showSparklines
-                    ? UsageHistoryStore.shared.series(profileID: profile.id, window: window.title)
-                    : []
-                return QuotaWindowView(window: window, history: series, showSparkline: showSparklines, showLabels: profile.showLabels ?? true, showResets: profile.showResetTimes ?? true)
-            }
-        } else {
-            let label = NSTextField(labelWithString: ProfileFormatting.usageLines(for: profile, isRefreshing: isRefreshing).first ?? "Usage unavailable")
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.font = .systemFont(ofSize: 11, weight: .medium)
-            label.textColor = .secondaryLabelColor
-            quotaViews = [label]
-        }
+        let body = NSStackView(views: rows + (resets.map { [$0] } ?? []))
+        body.translatesAutoresizingMaskIntoConstraints = false
+        body.orientation = .vertical
+        body.spacing = 4
+        body.alignment = .leading
+        if resets != nil, let last = rows.last { body.setCustomSpacing(5, after: last) }
 
-        let lastQuota = quotaViews.last
-        if profile.showManualResets ?? true {
-            quotaViews.append(ManualResetView(inventory: profile.usage?.manualResets))
-        }
-
-        let quotaStack = NSStackView(views: quotaViews)
-        quotaStack.translatesAutoresizingMaskIntoConstraints = false
-        quotaStack.orientation = .vertical
-        quotaStack.spacing = 5
-        quotaStack.alignment = .leading
-        if profile.showManualResets ?? true, let lastQuota { quotaStack.setCustomSpacing(10, after: lastQuota) }
-
-        addSubview(icon)
-        addSubview(title)
-        addSubview(subtitle)
-        addSubview(statusStack)
-        addSubview(quotaStack)
-
-        // Auto-start reads as one more fact about the account, on the subtitle's line.
-        var subtitleTrailing = subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16)
-        if showsControls {
-            let autoStart = AutoStartLabel(isOn: profile.autoStartsSession)
-            addSubview(autoStart)
-            NSLayoutConstraint.activate([
-                autoStart.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-                autoStart.centerYAnchor.constraint(equalTo: subtitle.centerYAnchor),
-            ])
-            subtitleTrailing = subtitle.trailingAnchor.constraint(lessThanOrEqualTo: autoStart.leadingAnchor, constant: -8)
-        }
-
-        NSLayoutConstraint.activate([
+        for view in [icon, name, plan, trailingStack, body] as [NSView] { addSubview(view) }
+        var constraints: [NSLayoutConstraint] = [
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            icon.topAnchor.constraint(equalTo: topAnchor, constant: 14),
-            icon.widthAnchor.constraint(equalToConstant: 28),
-            icon.heightAnchor.constraint(equalToConstant: 28),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            icon.heightAnchor.constraint(equalToConstant: 18),
 
-            statusStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: showsControls ? -12 : -16),
-            statusStack.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            name.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            plan.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 6),
+            plan.firstBaselineAnchor.constraint(equalTo: name.firstBaselineAnchor),
+            plan.trailingAnchor.constraint(lessThanOrEqualTo: trailingStack.leadingAnchor, constant: -8),
 
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: statusStack.leadingAnchor, constant: -10),
+            trailingStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: showsControls ? -12 : -16),
+            trailingStack.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
 
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-            subtitleTrailing,
-
-            quotaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            quotaStack.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 8),
-            quotaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            quotaStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10)
-        ])
-
-        // Stretch each quota row to the full stack width so bars start at the far
-        // left and the reset time sits flush right (no dead space on either side).
-        for quotaView in quotaViews {
-            quotaView.widthAnchor.constraint(equalTo: quotaStack.widthAnchor).isActive = true
+            body.topAnchor.constraint(equalTo: topAnchor, constant: bodyTop),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+        ]
+        for row in rows {
+            row.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         }
-        let rowsHeight = quotaViews.reduce(CGFloat(0)) { $0 + max(0, $1.intrinsicContentSize.height) }
-        let gaps = CGFloat(max(0, quotaViews.count - 1)) * 5 + ((profile.showManualResets ?? true) && lastQuota != nil ? 5 : 0)
-        setFrameSize(NSSize(width: 320, height: 62 + rowsHeight + gaps))
-
+        if let alert {
+            let alertLabel = NSTextField(labelWithString: alert)
+            alertLabel.translatesAutoresizingMaskIntoConstraints = false
+            alertLabel.font = .systemFont(ofSize: 11, weight: .medium)
+            alertLabel.textColor = .systemOrange
+            alertLabel.lineBreakMode = .byTruncatingTail
+            if profile.usageStale == true, let error = profile.refreshError {
+                alertLabel.toolTip = "Couldn't update: \(error)"
+            }
+            addSubview(alertLabel)
+            constraints += [
+                alertLabel.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+                alertLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+                alertLabel.topAnchor.constraint(equalTo: topAnchor, constant: headerBottom + 2),
+                alertLabel.heightAnchor.constraint(equalToConstant: 15),
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     override func updateTrackingAreas() {
@@ -955,36 +1056,4 @@ final class MenuBarPinView: NSView {
         onToggle?(isOn)
         return true
     }
-}
-
-/// The account's 5h auto-start setting, written like the rest of the card's details:
-/// a small bolt and a word, in the subtitle's type. It's status, not a control - that
-/// lives in Settings - so clicks fall through to the card and open the app.
-final class AutoStartLabel: NSStackView {
-    init(isOn: Bool) {
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: isOn ? "bolt.fill" : "bolt.slash", accessibilityDescription: nil)
-        icon.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
-        icon.contentTintColor = isOn ? .systemYellow : .quaternaryLabelColor
-
-        let label = NSTextField(labelWithString: isOn ? "Auto-start" : "Auto-start off")
-        label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.textColor = isOn ? .secondaryLabelColor : .tertiaryLabelColor
-
-        super.init(frame: .zero)
-        setViews([icon, label], in: .leading)
-        orientation = .horizontal
-        spacing = 3
-        alignment = .centerY
-        translatesAutoresizingMaskIntoConstraints = false
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        toolTip = isOn
-            ? "LLMCodeBar starts this account's 5h window when it's idle. Change it in Settings."
-            : "The 5h window starts on your first message. Turn on auto-start in Settings."
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    /// Let clicks reach the card underneath.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

@@ -35,7 +35,8 @@ struct ManualResetInventory: Codable {
         return result
     }
 
-    static func dateText(_ date: Date, now: Date = Date(), locale: Locale = .autoupdatingCurrent) -> String {
+    /// "17 Nov", in English like the rest of the app.
+    static func dateText(_ date: Date, now: Date = Date(), locale: Locale = Locale(identifier: "en_GB")) -> String {
         let formatter = DateFormatter()
         formatter.locale = locale
         formatter.setLocalizedDateFormatFromTemplate(Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: now) ? "d MMM" : "d MMM yyyy")

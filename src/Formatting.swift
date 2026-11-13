@@ -66,6 +66,21 @@ enum ProfileFormatting {
         "\(Int(window.usedPercent.rounded()))% used"
     }
 
+    static func isUsedUp(_ window: UsageWindow) -> Bool {
+        window.usedPercent >= 99.5
+    }
+
+    /// "in 52 min", "in 3h 10m", or a day and time once it's a day or more away.
+    static func backIn(_ date: Date) -> String {
+        let minutes = max(1, Int(ceil(date.timeIntervalSinceNow / 60)))
+        if minutes < 60 { return "in \(minutes) min" }
+        if minutes < 24 * 60 {
+            let hours = minutes / 60, rest = minutes % 60
+            return rest == 0 ? "in \(hours)h" : "in \(hours)h \(rest)m"
+        }
+        return resetDayFormatter.string(from: date)
+    }
+
     static func resetText(for window: UsageWindow) -> String {
         guard let resetsAt = window.resetsAt else { return "-" }
         // A weekly window resets days from now, so a bare "20:00" is meaningless.
@@ -134,6 +149,8 @@ enum ProfileFormatting {
     private static let resetDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE HH:mm"
+        // The app is in English, so its day names are too ("Sat", not "sam.").
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         return formatter
     }()
