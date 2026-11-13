@@ -81,47 +81,298 @@ enum MenuBarIcon {
     }
 }
 
-/// Renders the menu-bar status image as up to two stacked rows, each showing an
-/// account's app icon (Claude/ChatGPT) followed by its 5h % so you can tell them apart.
+/// Renders the menu-bar status image: pinned accounts laid out in a grid of up to
+/// 3 rows by 3 columns, each cell an app icon (Claude/ChatGPT) followed by its 5h %,
+/// optionally with a short label on the icon so two accounts of one app can be told apart.
 enum MenuBarBadge {
     struct Row {
         let icon: NSImage
         let percent: Double
+        var label: String? = nil
+        var weekPercent: Double? = nil
+        var fiveHourResetsAt: Date? = nil
+        var weekResetsAt: Date? = nil
     }
 
-    static func image(rows: [Row]) -> NSImage {
-        let visible = Array(rows.prefix(2))
-        let twoUp = visible.count >= 2
+    struct Layout {
+        var rows = 2
+        var columns = 1
+        var fillsRowsFirst = false
+        var showsLabels = false
+        /// Only used when the accounts fit on one row.
+        var showsWeekly = false
+        var resets: MenuBarResetTimes = .none
+        var sideBySide = false
+    }
 
-        let font = NSFont.monospacedDigitSystemFont(ofSize: twoUp ? 9.5 : 11.5, weight: .semibold)
-        let iconSize: CGFloat = twoUp ? 11 : 15
-        let rowHeight: CGFloat = twoUp ? 11 : 18
-        let gap: CGFloat = 2.5
-        let totalHeight = rowHeight * CGFloat(max(1, visible.count))
+    /// Sizes for a grid that uses 1, 2 or 3 rows of the 22pt menu-bar item.
+    private struct Metrics {
+        let font: CGFloat, icon: CGFloat, rowHeight: CGFloat, gap: CGFloat, columnGap: CGFloat
+        let pillFont: CGFloat, pillHeight: CGFloat, pillDrop: CGFloat
 
-        let texts: [NSAttributedString] = visible.map { row in
-            NSAttributedString(
-                string: "\(Int(row.percent.rounded()))%",
-                attributes: [.font: font, .foregroundColor: MenuBarIcon.statusColor(for: row.percent)])
-        }
-        let contentWidth = texts.reduce(CGFloat(0)) { max($0, iconSize + gap + $1.size().width) }
-
-        let image = NSImage(size: NSSize(width: ceil(contentWidth), height: totalHeight))
-        image.lockFocus()
-        defer { image.unlockFocus() }
-
-        for (i, row) in visible.enumerated() {
-            // Row 0 sits at the top (menu-bar images use a bottom-left origin).
-            let rowMidY = totalHeight - (CGFloat(i) + 0.5) * rowHeight
-            let iconRect = NSRect(x: 0, y: rowMidY - iconSize / 2, width: iconSize, height: iconSize)
-            row.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
-
-            let textSize = texts[i].size()
-            texts[i].draw(at: NSPoint(x: iconSize + gap, y: rowMidY - textSize.height / 2))
+        static func forRows(_ rows: Int) -> Metrics {
+            switch rows {
+            case 1: return Metrics(font: 11.5, icon: 15, rowHeight: 18, gap: 2.5, columnGap: 6, pillFont: 7.6, pillHeight: 8.2, pillDrop: 0.8)
+            case 2: return Metrics(font: 9.5, icon: 11, rowHeight: 11, gap: 2.5, columnGap: 6, pillFont: 5.8, pillHeight: 6.2, pillDrop: 0.4)
+            default: return Metrics(font: 7.4, icon: 22.0 / 3, rowHeight: 22.0 / 3, gap: 1.5, columnGap: 5, pillFont: 4.4, pillHeight: 4.7, pillDrop: 0.2)
+            }
         }
 
+        /// One row with the 5h line above the weekly line, next to a bigger icon.
+        static let stacked = Metrics(font: 9, icon: 17, rowHeight: 22, gap: 2.5, columnGap: 8, pillFont: 7.6, pillHeight: 8.2, pillDrop: 0.8)
+        /// One row with everything on a single line.
+        static let sideBySide = Metrics(font: 11.5, icon: 15, rowHeight: 18, gap: 2.5, columnGap: 8, pillFont: 7.6, pillHeight: 8.2, pillDrop: 0.8)
+    }
+
+    /// The badge for the accounts pinned in `config`, or nil when none has usage yet.
+    static func image(for config: AppConfig) -> NSImage? {
+        let cells: [Row] = config.menuBarProfileIDList.compactMap { id in
+            guard let profile = config.profiles.first(where: { $0.id == id }),
+                  let percent = ProfileFormatting.primaryUsagePercent(for: profile) else { return nil }
+            let icon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
+            return Row(icon: icon, percent: percent, label: profile.menuBarLabelText,
+                       weekPercent: profile.usage?.weeklyWindow?.usedPercent,
+                       fiveHourResetsAt: profile.usage?.fiveHourWindow?.resetsAt,
+                       weekResetsAt: profile.usage?.weeklyWindow?.resetsAt)
+        }
+        guard !cells.isEmpty else { return nil }
+        return image(rows: cells, layout: Layout(
+            rows: config.menuBarGridRows, columns: config.menuBarGridColumns,
+            fillsRowsFirst: config.fillsMenuBarRowsFirst, showsLabels: config.showsMenuBarLabels,
+            showsWeekly: config.showsMenuBarWeekly, resets: config.menuBarResets,
+            sideBySide: config.menuBarDetailsSideBySide))
+    }
+
+    /// Time left before a reset, in its largest unit only: "3d", "4h", "7m". Nil once
+    /// the reset has passed (an idle window has nothing to count down to).
+    static func countdown(to date: Date?, now: Date = Date()) -> String? {
+        guard let date else { return nil }
+        let seconds = date.timeIntervalSince(now)
+        guard seconds > 0 else { return nil }
+        if seconds >= 86_400 { return "\(Int(seconds / 86_400))d" }
+        if seconds >= 3_600 { return "\(Int(seconds / 3_600))h" }
+        return "\(max(1, Int(seconds / 60)))m"
+    }
+
+    /// Where each of `count` cells goes: down each column first, or along each row first.
+    static func positions(count: Int, layout: Layout) -> [(row: Int, column: Int)] {
+        guard count > 1 else { return count == 1 ? [(0, 0)] : [] }
+        if layout.fillsRowsFirst {
+            let perRow = min(layout.columns, count)
+            return (0..<count).map { ($0 / perRow, $0 % perRow) }
+        }
+        let perColumn = min(layout.rows, count)
+        return (0..<count).map { ($0 % perColumn, $0 / perColumn) }
+    }
+
+    /// What one cell says: the 5h line and, when stacked, the weekly line under it.
+    /// Each line is a percent and a countdown, drawn as two columns so the countdowns
+    /// line up whatever the width of the percent above or below them.
+    private struct CellText {
+        struct Line { var percent: NSAttributedString?; var countdown: NSAttributedString? }
+        let lines: [Line]
+        let space: CGFloat
+
+        var percentWidth: CGFloat { lines.map { $0.percent?.size().width ?? 0 }.max() ?? 0 }
+        var countdownWidth: CGFloat { lines.map { $0.countdown?.size().width ?? 0 }.max() ?? 0 }
+        var countdownX: CGFloat { percentWidth > 0 ? percentWidth + space : 0 }
+        var width: CGFloat { countdownWidth > 0 ? countdownX + countdownWidth : percentWidth }
+    }
+
+    static func image(rows cells: [Row], layout: Layout = Layout(), now: Date = Date()) -> NSImage {
+        let visible = Array(cells.prefix(layout.rows * layout.columns))
+        let pos = positions(count: visible.count, layout: layout)
+        let usedRows = (pos.map(\.row).max() ?? 0) + 1
+        let usedColumns = (pos.map(\.column).max() ?? 0) + 1
+
+        // The weekly % and reset countdowns only fit when everything is on one row.
+        func details(_ row: Row) -> (five: String?, week: String?, weekly: Double?) {
+            guard usedRows == 1 else { return (nil, nil, nil) }
+            return (layout.resets.showsFiveHour ? countdown(to: row.fiveHourResetsAt, now: now) : nil,
+                    layout.resets.showsWeekly ? countdown(to: row.weekResetsAt, now: now) : nil,
+                    layout.showsWeekly ? row.weekPercent : nil)
+        }
+        let hasWeeklyLine = visible.contains { let d = details($0); return d.weekly != nil || d.week != nil }
+        let hasDetails = visible.contains { let d = details($0); return d.five != nil || d.weekly != nil || d.week != nil }
+        let stacked = hasWeeklyLine && !layout.sideBySide
+        let m: Metrics = stacked ? .stacked : (hasDetails ? .sideBySide : .forRows(usedRows))
+        let totalHeight = usedRows == 1 && !stacked ? m.rowHeight : 22
+
+        let font = NSFont.monospacedDigitSystemFont(ofSize: m.font, weight: .semibold)
+        let dimFont = NSFont.monospacedDigitSystemFont(ofSize: m.font - (stacked ? 0.5 : 1.5), weight: .medium)
+        func percent(_ value: Double) -> NSAttributedString {
+            NSAttributedString(string: "\(Int(value.rounded()))%",
+                               attributes: [.font: font, .foregroundColor: MenuBarIcon.statusColor(for: value)])
+        }
+        func dim(_ text: String) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [.font: dimFont, .foregroundColor: NSColor.secondaryLabelColor])
+        }
+        let space = dim(" ").size().width
+        let texts: [CellText] = visible.map { row in
+            let d = details(row)
+            let five = CellText.Line(percent: percent(row.percent), countdown: d.five.map(dim))
+            var weekly: CellText.Line?
+            if d.weekly != nil || d.week != nil {
+                weekly = CellText.Line(percent: d.weekly.map(percent), countdown: d.week.map(dim))
+            }
+            if stacked { return CellText(lines: [five] + (weekly.map { [$0] } ?? []), space: space) }
+            // Side by side: everything on one line, so there's nothing to align.
+            let line = NSMutableAttributedString(attributedString: five.percent!)
+            if let c = five.countdown { line.append(dim(" ")); line.append(c) }
+            if let weekly {
+                line.append(dim(" · "))
+                if let p = weekly.percent { line.append(p) }
+                if let c = weekly.countdown {
+                    if weekly.percent != nil { line.append(dim(" ")) }
+                    line.append(c)
+                }
+            }
+            return CellText(lines: [CellText.Line(percent: line, countdown: nil)], space: space)
+        }
+        func textWidth(_ t: CellText) -> CGFloat { t.width }
+
+        var columnWidths = [CGFloat](repeating: 0, count: usedColumns)
+        for (i, p) in pos.enumerated() {
+            columnWidths[p.column] = max(columnWidths[p.column], m.icon + m.gap + textWidth(texts[i]))
+        }
+        let width = columnWidths.reduce(0, +) + m.columnGap * CGFloat(usedColumns - 1)
+
+        // Drawn on demand, so the grey countdowns follow the menu bar's light or dark look.
+        let image = NSImage(size: NSSize(width: max(1, ceil(width)), height: totalHeight), flipped: false) { _ in
+            for (i, p) in pos.enumerated() {
+                let x = columnWidths.prefix(p.column).reduce(0, +) + m.columnGap * CGFloat(p.column)
+                // Row 0 sits at the top (menu-bar images use a bottom-left origin).
+                let rowMidY = totalHeight - (CGFloat(p.row) + 0.5) * m.rowHeight
+                let iconRect = NSRect(x: x, y: rowMidY - m.icon / 2, width: m.icon, height: m.icon)
+                visible[i].icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+                if layout.showsLabels, let label = visible[i].label, !label.isEmpty {
+                    drawLabel(label, on: iconRect, metrics: m)
+                }
+                let textX = x + m.icon + m.gap
+                let text = texts[i]
+                let offsets: [CGFloat] = text.lines.count > 1 ? [5.5, -5.5] : [0]
+                for (line, offset) in zip(text.lines, offsets) {
+                    for (part, partX) in [(line.percent, textX), (line.countdown, textX + text.countdownX)] {
+                        guard let part else { continue }
+                        part.draw(at: NSPoint(x: partX, y: rowMidY + offset - part.size().height / 2))
+                    }
+                }
+            }
+            return true
+        }
         image.isTemplate = false
         return image
+    }
+
+    /// A white capsule across the bottom of the icon, like T3 Code's dock badge.
+    private static func drawLabel(_ text: String, on icon: NSRect, metrics m: Metrics) {
+        let string = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: m.pillFont, weight: .heavy),
+            .foregroundColor: NSColor(white: 0.22, alpha: 1),
+            .kern: 0.1,
+        ])
+        let textSize = string.size()
+        let height = m.pillHeight
+        let width = max(height + 1, textSize.width + m.pillFont * 0.45)
+        let rect = NSRect(x: icon.midX - width / 2, y: max(0, icon.minY - m.pillDrop), width: width, height: height)
+        let path = NSBezierPath(roundedRect: rect, xRadius: height / 2, yRadius: height / 2)
+        NSColor.white.setFill()
+        path.fill()
+        NSColor(white: 0, alpha: 0.28).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+        string.draw(at: NSPoint(x: rect.midX - textSize.width / 2, y: rect.midY - textSize.height / 2 + m.pillFont * 0.03))
+    }
+}
+
+/// The 3 x 3 grid in Settings for picking the menu-bar layout: hover shows the size
+/// you'd get, a click picks it.
+final class MenuBarGridPicker: NSView {
+    var rows = 2 { didSet { needsDisplay = true } }
+    var columns = 1 { didSet { needsDisplay = true } }
+    var isEnabled = true { didSet { needsDisplay = true } }
+    /// The size under the mouse, or nil when the mouse leaves.
+    var onHover: ((rows: Int, columns: Int)?) -> Void = { _ in }
+    var onPick: (_ rows: Int, _ columns: Int) -> Void = { _, _ in }
+
+    private var hover: (rows: Int, columns: Int)?
+    private let cell = NSSize(width: 18, height: 14)
+    private let spacing: CGFloat = 3
+    private let inset: CGFloat = 4
+    private var maxRows: Int { AppConfig.maxMenuBarRows }
+    private var maxColumns: Int { AppConfig.maxMenuBarColumns }
+
+    override var isFlipped: Bool { true }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: inset * 2 + CGFloat(maxColumns) * cell.width + CGFloat(maxColumns - 1) * spacing,
+               height: inset * 2 + CGFloat(maxRows) * cell.height + CGFloat(maxRows - 1) * spacing)
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    private func size(at point: NSPoint) -> (rows: Int, columns: Int) {
+        let column = Int((point.x - inset + spacing / 2) / (cell.width + spacing)) + 1
+        let row = Int((point.y - inset + spacing / 2) / (cell.height + spacing)) + 1
+        return (min(maxRows, max(1, row)), min(maxColumns, max(1, column)))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard isEnabled else { return }
+        let s = size(at: convert(event.locationInWindow, from: nil))
+        if hover?.rows != s.rows || hover?.columns != s.columns {
+            hover = s
+            needsDisplay = true
+            onHover(s)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hover = nil
+        needsDisplay = true
+        onHover(nil)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        let s = size(at: convert(event.locationInWindow, from: nil))
+        rows = s.rows
+        columns = s.columns
+        onPick(s.rows, s.columns)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let frame = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        NSColor.controlBackgroundColor.setFill()
+        frame.fill()
+        NSColor.separatorColor.setStroke()
+        frame.stroke()
+
+        let accent = NSColor.controlAccentColor.withAlphaComponent(isEnabled ? 1 : 0.4)
+        for r in 1...maxRows {
+            for c in 1...maxColumns {
+                let rect = NSRect(x: inset + CGFloat(c - 1) * (cell.width + spacing),
+                                  y: inset + CGFloat(r - 1) * (cell.height + spacing),
+                                  width: cell.width, height: cell.height).insetBy(dx: 0.5, dy: 0.5)
+                let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
+                let chosen = r <= rows && c <= columns
+                let hovered = hover.map { r <= $0.rows && c <= $0.columns } ?? false
+                if chosen {
+                    accent.setFill()
+                    path.fill()
+                } else if hovered {
+                    accent.withAlphaComponent(0.22).setFill()
+                    path.fill()
+                }
+                (chosen || hovered ? accent : NSColor.tertiaryLabelColor).setStroke()
+                path.lineWidth = 1
+                path.stroke()
+            }
+        }
     }
 }
 

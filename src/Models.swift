@@ -54,6 +54,16 @@ struct UsageInfo: Codable {
         windows.first?.usedPercent
     }
 
+    /// The 5-hour session window (the first one when nothing is titled "5h").
+    var fiveHourWindow: UsageWindow? {
+        windows.first { $0.title == "5h" } ?? windows.first
+    }
+
+    /// The all-models weekly window, if the provider reports one.
+    var weeklyWindow: UsageWindow? {
+        windows.first { $0.title == "Week" }
+    }
+
     var summaryLine: String {
         if let status, windows.isEmpty, creditsRemaining == nil {
             return status
@@ -155,6 +165,21 @@ struct LaunchProfile: Codable, Identifiable {
     }
 
     var autoStartsSession: Bool { autoStartSession ?? false }
+
+    /// What the user typed for this account's label on its menu-bar icon (up to 3
+    /// characters). Empty or nil means `defaultMenuBarLabel`.
+    var menuBarLabel: String?
+
+    /// The first 2 characters of the email (or of the name when there's no email).
+    var defaultMenuBarLabel: String {
+        String((accountEmail ?? accountName ?? "").prefix(2))
+    }
+
+    /// The label drawn on this account's icon in the menu bar.
+    var menuBarLabelText: String {
+        let custom = (menuBarLabel ?? "").trimmingCharacters(in: .whitespaces)
+        return custom.isEmpty ? defaultMenuBarLabel : String(custom.prefix(3))
+    }
 
     static func make(provider: Provider, appPath: String, dataDir: String, identity: AccountIdentity, isUserAdded: Bool = false) -> LaunchProfile {
         let account = identity.displayName ?? identity.email ?? "Signed-in account"
@@ -291,6 +316,23 @@ struct AccountIdentity {
     }
 }
 
+/// Which reset countdowns a one-row menu bar shows next to the percentages.
+enum MenuBarResetTimes: String, Codable, CaseIterable {
+    case both, fiveHour, weekly, none
+
+    var title: String {
+        switch self {
+        case .both: return "5h and weekly"
+        case .fiveHour: return "5h only"
+        case .weekly: return "Weekly only"
+        case .none: return "None"
+        }
+    }
+
+    var showsFiveHour: Bool { self == .both || self == .fiveHour }
+    var showsWeekly: Bool { self == .both || self == .weekly }
+}
+
 struct AppConfig: Codable {
     var launchAtLogin: Bool
     var autoApproveCookieAccess: Bool?
@@ -303,8 +345,21 @@ struct AppConfig: Codable {
     /// Legacy single-account menu-bar selection. Superseded by `menuBarProfileIDs`,
     /// kept for backward compatibility and as the fallback icon's target.
     var menuBarProfileID: String?
-    /// Up to two accounts whose 5h % is shown in the menu bar, each with its app icon.
+    /// Accounts whose 5h % is shown in the menu bar, each with its app icon, in the
+    /// order they were pinned (which is their order in the grid).
     var menuBarProfileIDs: [String]?
+    /// The menu-bar grid: 1-3 rows by 1-3 columns. Defaults to 2 x 1, the old layout.
+    var menuBarRows: Int?
+    var menuBarColumns: Int?
+    /// Fill the top row first instead of going down each column first.
+    var menuBarFillRowsFirst: Bool?
+    /// Draw each account's label (`LaunchProfile.menuBarLabelText`) on its icon.
+    var showMenuBarLabels: Bool?
+    /// When the accounts sit on one row: also show the weekly %, which reset countdowns
+    /// to show, and whether those sit stacked (5h above weekly) or side by side.
+    var menuBarShowWeekly: Bool?
+    var menuBarResetTimes: MenuBarResetTimes?
+    var menuBarSideBySide: Bool?
     /// Download and install new GitHub releases in the background, restarting the app
     /// once the swap is done. Defaults to on for configs written before this existed.
     var autoUpdate: Bool?
@@ -318,10 +373,24 @@ struct AppConfig: Codable {
     /// and offer to finish it. Defaults to on. Closing a window is always the user's click.
     var offerClaudeUpdates: Bool?
 
-    /// The effective menu-bar accounts (max 2), falling back to the legacy single ID.
+    static let maxMenuBarRows = 3
+    static let maxMenuBarColumns = 3
+
+    var menuBarGridRows: Int { min(Self.maxMenuBarRows, max(1, menuBarRows ?? 2)) }
+    var menuBarGridColumns: Int { min(Self.maxMenuBarColumns, max(1, menuBarColumns ?? 1)) }
+    /// How many accounts fit in the menu bar.
+    var menuBarCapacity: Int { menuBarGridRows * menuBarGridColumns }
+    var fillsMenuBarRowsFirst: Bool { menuBarFillRowsFirst ?? false }
+    var showsMenuBarLabels: Bool { showMenuBarLabels ?? false }
+    var showsMenuBarWeekly: Bool { menuBarShowWeekly ?? true }
+    var menuBarResets: MenuBarResetTimes { menuBarResetTimes ?? .both }
+    var menuBarDetailsSideBySide: Bool { menuBarSideBySide ?? false }
+
+    /// The effective menu-bar accounts (up to the grid's size), falling back to the
+    /// legacy single ID.
     var menuBarProfileIDList: [String] {
         if let ids = menuBarProfileIDs, !ids.isEmpty {
-            return Array(ids.prefix(2))
+            return Array(ids.prefix(menuBarCapacity))
         }
         if let single = menuBarProfileID {
             return [single]
@@ -351,5 +420,41 @@ struct AppConfig: Codable {
     }
 
     var showsPercentInMenuBar: Bool { showPercentInMenuBar ?? false }
+
+    /// Pins or unpins an account in the menu bar. When the grid is full, the account
+    /// pinned longest ago makes room. Returns the ids that were unpinned to make room.
+    @discardableResult
+    mutating func setMenuBar(_ id: String, shown: Bool) -> [String] {
+        var ids = showsPercentInMenuBar ? menuBarProfileIDList : []
+        var bumped: [String] = []
+        if shown {
+            if !ids.contains(id) { ids.append(id) }
+            if ids.count > menuBarCapacity {
+                bumped = Array(ids.prefix(ids.count - menuBarCapacity))
+                ids.removeFirst(ids.count - menuBarCapacity)
+            }
+        } else {
+            ids.removeAll { $0 == id }
+        }
+        menuBarProfileIDs = ids
+        menuBarProfileID = ids.first
+        showPercentInMenuBar = !ids.isEmpty
+        return bumped
+    }
+
+    /// Resizes the menu-bar grid. Accounts in cells that no longer exist are unpinned,
+    /// from the last cell back. Returns the ids that were unpinned.
+    @discardableResult
+    mutating func setMenuBarGrid(rows: Int, columns: Int) -> [String] {
+        let ids = showsPercentInMenuBar ? (menuBarProfileIDs ?? menuBarProfileID.map { [$0] } ?? []) : []
+        menuBarRows = min(Self.maxMenuBarRows, max(1, rows))
+        menuBarColumns = min(Self.maxMenuBarColumns, max(1, columns))
+        guard ids.count > menuBarCapacity else { return [] }
+        let kept = Array(ids.prefix(menuBarCapacity))
+        menuBarProfileIDs = kept
+        menuBarProfileID = kept.first
+        showPercentInMenuBar = !kept.isEmpty
+        return Array(ids.dropFirst(menuBarCapacity))
+    }
 }
 
