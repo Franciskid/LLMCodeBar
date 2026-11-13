@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import SQLite3
 
 func check(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -124,6 +125,17 @@ for index in 0...3 {
     try snapshot(settings.window!.contentView!, ["general", "menu-bar", "account", "continue"][index])
 }
 
+// Updates install only with the project's own Ed25519 signature (no Apple account).
+let testKey = Curve25519.Signing.PrivateKey()
+let testPublic = testKey.publicKey.rawRepresentation.base64EncodedString()
+let image = Data("LLMCodeBar.dmg bytes".utf8)
+let goodSignature = try testKey.signature(for: image).base64EncodedString()
+check(Updater.isValidSignature(goodSignature + "\n", for: image, publicKey: testPublic), "a release signed with the key installs")
+check(!Updater.isValidSignature(goodSignature, for: image + Data([0]), publicKey: testPublic), "a changed image is refused")
+check(!Updater.isValidSignature(goodSignature, for: image), "a release signed with another key is refused")
+check(!Updater.isValidSignature("not base64", for: image, publicKey: testPublic), "a garbled signature is refused")
+check(Data(base64Encoded: Updater.signingPublicKey)?.count == 32, "the built-in public key is an Ed25519 key")
+
 var gridConfig = AppConfig(launchAtLogin: false, profiles: [profile])
 gridConfig.setMenuBarGrid(rows: 3, columns: 3)
 for i in 0..<9 { gridConfig.setMenuBar("account-\(i)", shown: true) }
@@ -156,6 +168,60 @@ let (transcriptID, transcript) = try T3SessionTransfer.transcript(threads[0], da
 let text = String(data: transcript, encoding: .utf8)!
 check(text.contains("café") && text.contains("Completed response") && !text.contains("Partial live reply"), "T3 copies completed conversation text")
 check(text.contains("T3 Code"), "T3 provenance is preserved")
+// Any conversation can start a T3 thread: the history goes in as its first message.
+let handoffFolder = FileManager.default.temporaryDirectory.appendingPathComponent("LLMCodeBar-t3-" + UUID().uuidString)
+try FileManager.default.createDirectory(at: handoffFolder, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: handoffFolder) }
+let claudeLines = [
+    #"{"type":"user","message":{"role":"user","content":"Fix the login bug<system-reminder>ignore me</system-reminder>"},"timestamp":"2026-11-13T12:00:00Z"}"#,
+    #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Looking at auth.swift"},{"type":"tool_use","name":"Read","input":{}}]}}"#,
+    #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file text"}]}}"#,
+    #"{"type":"user","isSidechain":true,"message":{"role":"user","content":"side chain"}}"#,
+    #"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+    #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Fixed: the token expired early."}]}}"#,
+]
+let claudeFile = handoffFolder.appendingPathComponent("s.jsonl")
+try claudeLines.joined(separator: "\n").write(to: claudeFile, atomically: true, encoding: .utf8)
+let claudeSteps = try T3SessionTransfer.claudeCodeSteps(transcript: claudeFile)
+let stepText = claudeSteps.map { step -> String in
+    switch step { case let .user(t, _): return "U:" + t; case let .agent(t, _): return "A:" + t; case let .note(t, _): return "N:" + t; case let .command(c, _, _, _): return "C:" + c }
+}
+check(stepText == ["U:Fix the login bug", "A:Looking at auth.swift", "N:Used Read", "A:Fixed: the token expired early."], "Claude Code transcripts keep what was said, not tool results or injected text: \(stepText)")
+let handoff = T3SessionTransfer.Handoff(title: "Login bug", cwd: handoffFolder.path, source: "Claude Code", steps: claudeSteps)
+let firstMessage = T3SessionTransfer.handoffMessage(handoff)
+check(firstMessage.contains("moved here from Claude Code") && firstMessage.contains("## User\n\nFix the login bug") && firstMessage.contains("Don't change anything yet"), "the T3 thread's first message frames the history")
+let long = T3SessionTransfer.Handoff(title: "Long", cwd: handoffFolder.path, source: "Codex",
+    steps: [.user("The original ask", nil)] + (0..<400).map { .agent("Reply \($0) " + String(repeating: "x", count: 400), nil) })
+let longMessage = T3SessionTransfer.handoffMessage(long)
+check(longMessage.utf8.count <= 64_000 && longMessage.contains("The original ask") && longMessage.contains("Reply 399") && longMessage.contains("left out here to fit"), "a long history keeps its first message and its end, under T3's limit")
+
+// The t3 command: a folder T3 doesn't know yet becomes a project, then the thread starts.
+let fakeT3 = handoffFolder.appendingPathComponent("t3")
+let calls = handoffFolder.appendingPathComponent("calls.txt")
+try """
+#!/bin/sh
+echo "$@" >> '\(calls.path)'
+case "$1 $2" in
+  "project add") touch '\(handoffFolder.path)/added'; exit 0 ;;
+  "thread start")
+    cat > '\(handoffFolder.path)/stdin.txt'
+    if [ -f '\(handoffFolder.path)/added' ]; then echo '{"threadId":"thread-123"}'; exit 0; fi
+    echo "No T3 Code project matches '$3'. Pass a project id or a path inside a project." >&2; exit 1 ;;
+esac
+exit 3
+""".write(to: fakeT3, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeT3.path)
+let realCLI = T3SessionTransfer.cliPath
+T3SessionTransfer.cliPath = fakeT3.path
+let started = try T3SessionTransfer.start(handoff)
+T3SessionTransfer.cliPath = realCLI
+let callLog = try String(contentsOf: calls, encoding: .utf8)
+check(started.threadID == "thread-123" && started.projectPath == handoffFolder.path, "the new thread's id comes back")
+check(callLog.contains("project add \(handoffFolder.path)") && callLog.contains("--title Login bug --json"), "an unknown folder is added as a T3 project first: \(callLog)")
+let sentToT3 = try String(contentsOf: handoffFolder.appendingPathComponent("stdin.txt"), encoding: .utf8)
+check(sentToT3 == firstMessage, "the history reaches T3 on stdin, whole")
+check(T3SessionTransfer.CLIFailure(message: "connect ECONNREFUSED 127.0.0.1").errorDescription == "T3 Code isn't running. Open it, then try again.", "a closed T3 is explained")
+
 // Validate the real installed schema too, without exporting or changing any account.
 let localThreads = FileManager.default.fileExists(atPath: T3SessionTransfer.database.path) ? try T3SessionTransfer.threads() : []
 print("Passed: config migration, per-account filters, reset row layout, compact settings, T3 fixture export. Local T3 schema: \(localThreads.count) threads readable.")

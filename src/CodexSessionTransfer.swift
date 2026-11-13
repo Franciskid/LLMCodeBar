@@ -332,7 +332,7 @@ enum CodexSessionTransfer {
         return ClaudeImport(sessionID: sessionID, metadataURL: metadataURL, transcriptURL: transcriptURL, trimmed: trimmed)
     }
 
-    private static func readHistory(of thread: Thread, from source: LaunchProfile) throws -> CodexThreadHistory {
+    static func readHistory(of thread: Thread, from source: LaunchProfile) throws -> CodexThreadHistory {
         let server = try startServer(for: source)
         defer { server.stop() }
         let response = try server.request("thread/read", params: ["threadId": thread.id, "includeTurns": true], timeout: 120)

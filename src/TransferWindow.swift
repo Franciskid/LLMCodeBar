@@ -116,6 +116,13 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
     private var isT3Source: Bool { sourcePopup.indexOfSelectedItem == profiles.count }
 
+    /// "T3 Code · New thread", the last choice under any account: the conversation starts
+    /// a new T3 thread instead of going to another account.
+    private var isT3Destination: Bool {
+        guard !isT3Source, T3SessionTransfer.isInstalled, let source else { return false }
+        return destinationPopup.indexOfSelectedItem == destinations(for: source).count
+    }
+
     private var source: LaunchProfile? {
         let index = sourcePopup.indexOfSelectedItem
         return profiles.indices.contains(index) ? profiles[index] : nil
@@ -170,6 +177,9 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         let others = destinations(for: source)
         for profile in others {
             destinationPopup.addItem(withTitle: accountTitle(profile))
+        }
+        if T3SessionTransfer.isInstalled {
+            destinationPopup.addItem(withTitle: "T3 Code  ·  New thread")
         }
         // Default to whichever destination has the most room left, keeping to the same
         // app when there's a choice - a Claude chat can't go to ChatGPT at all.
@@ -305,8 +315,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     private func updateTransferButton() {
         guard !isTransferring else { return }
         let item = selectedItem
-        transferButton.isEnabled = item != nil && destination != nil
-        if let item, let destination {
+        transferButton.isEnabled = item != nil && (destination != nil || isT3Destination)
+        if item != nil, isT3Destination {
+            transferButton.title = "Start a T3 thread"
+        } else if let item, let destination {
             let account = ChatTransfer.accountLabel(destination)
             switch item {
             case .code where destination.provider == .codex:
@@ -328,6 +340,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     // MARK: Transferring
 
     @objc private func performTransfer() {
+        if let item = selectedItem, isT3Destination, !isTransferring {
+            startT3Thread(from: item)
+            return
+        }
         guard let item = selectedItem, let destination, !isTransferring else { return }
         let source = self.source
         isTransferring = true
@@ -391,6 +407,77 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                 }
                 DispatchQueue.main.async {
                     self?.finishChatTransfer(outcome, destination: destination, profiles: profiles)
+                }
+            }
+        }
+    }
+
+    // MARK: Into T3
+
+    /// Starts a T3 thread whose first message carries this conversation. A chat has no
+    /// folder of its own, so it asks which one the thread should work in.
+    private func startT3Thread(from item: Item) {
+        guard let source else { return }
+        switch item {
+        case let .code(session): startT3Thread(from: item, source: source, folder: session.cwd)
+        case let .codex(thread): startT3Thread(from: item, source: source, folder: thread.cwd)
+        case .t3: return
+        case .chat:
+            guard let window else { return }
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.allowsMultipleSelection = false
+            panel.canCreateDirectories = true
+            panel.prompt = "Start Here"
+            panel.message = "Pick the folder the T3 thread works in. It becomes a T3 project if it isn't one yet."
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            panel.beginSheetModal(for: window) { [weak self] response in
+                guard response == .OK, let url = panel.url else { return }
+                self?.startT3Thread(from: item, source: source, folder: url.path)
+            }
+        }
+    }
+
+    private func startT3Thread(from item: Item, source: LaunchProfile, folder: String) {
+        isTransferring = true
+        transferButton.isEnabled = false
+        spinner.startAnimation(nil)
+        setStatus("Starting a T3 thread with “\(item.title)”…")
+        let allowKeychain = self.allowKeychain
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = Result { () -> (T3SessionTransfer.Started, String) in
+                let handoff: T3SessionTransfer.Handoff
+                switch item {
+                case let .code(session):
+                    guard let transcript = session.transcriptURL else {
+                        throw CodexSessionTransfer.error("That session's transcript is no longer on disk, so there's nothing to hand over.")
+                    }
+                    handoff = .init(title: session.displayTitle, cwd: folder, source: "Claude Code",
+                                    steps: try T3SessionTransfer.claudeCodeSteps(transcript: transcript))
+                case let .codex(thread):
+                    let history = try CodexSessionTransfer.readHistory(of: thread, from: source)
+                    handoff = .init(title: thread.displayTitle, cwd: history.cwd ?? folder, source: "Codex", steps: history.steps)
+                case let .chat(chat):
+                    let (name, steps) = try ChatTransfer.handoffSteps(chat: chat, from: source, allowKeychain: allowKeychain)
+                    handoff = .init(title: name, cwd: folder, source: "a Claude chat", steps: steps)
+                case .t3:
+                    throw CodexSessionTransfer.error("That's already a T3 thread.")
+                }
+                return (try T3SessionTransfer.start(handoff), handoff.title)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.spinner.stopAnimation(nil)
+                self.isTransferring = false
+                self.updateTransferButton()
+                switch outcome {
+                case let .success((started, title)):
+                    let project = URL(fileURLWithPath: started.projectPath).lastPathComponent
+                    self.setStatus("Started “\(title)” in T3 Code, project \(project). It's reading the history and will sum up where things stand.")
+                    T3SessionTransfer.open(projectPath: started.projectPath)
+                case let .failure(error):
+                    self.setStatus("Couldn't start the T3 thread: \(error.localizedDescription)", isError: true)
                 }
             }
         }
@@ -510,7 +597,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         let heading = NSTextField(labelWithString: "Move a session or a chat to another account")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let explainer = NSTextField(wrappingLabelWithString: "T3 Code conversations can be copied to Claude Code or Codex as text; attachments and tool state stay in T3. Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
+        let explainer = NSTextField(wrappingLabelWithString: "T3 Code conversations can be copied to Claude Code or Codex as text; attachments and tool state stay in T3. Any chat, Code session or Codex thread can also start a new T3 thread, which gets the conversation as its first message. Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
         explainer.font = .systemFont(ofSize: 11)
         explainer.textColor = .secondaryLabelColor
 
@@ -640,7 +727,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         ])
     }
 
-    @objc private func destinationChanged() { applyFilter() }
+    @objc private func destinationChanged() {
+        swapButton.isEnabled = !isT3Source && !isT3Destination
+        applyFilter()
+    }
 }
 
 /// One row: what it is, what it was called, and when you last touched it.

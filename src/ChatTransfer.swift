@@ -135,6 +135,27 @@ enum ChatTransfer {
         throw error("Couldn't send the transcript to \(accountLabel(destination)).")
     }
 
+    /// A chat's conversation as handoff steps, for starting a T3 thread from it.
+    static func handoffSteps(chat: ChatSummary, from source: LaunchProfile, allowKeychain: Bool) throws -> (name: String, steps: [CodexStep]) {
+        let context = try claudeContext(for: source, allowKeychain: allowKeychain)
+        let url = URL(string: "https://claude.ai/api/organizations/\(context.orgID)/chat_conversations/\(chat.uuid)?tree=True&rendering_mode=raw")!
+        let response = try SimpleHTTP.get(url, headers: context.headers, timeout: 30)
+        guard (200...299).contains(response.statusCode),
+              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+            throw error("Couldn't read that chat (HTTP \(response.statusCode)).")
+        }
+        let steps: [CodexStep] = orderedMessages(json).compactMap { message in
+            var body = ((message["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let attachments = (message["attachments"] as? [[String: Any]] ?? []).compactMap { $0["file_name"] as? String }
+                + (message["files"] as? [[String: Any]] ?? []).compactMap { $0["file_name"] as? String }
+            if !attachments.isEmpty { body += (body.isEmpty ? "" : "\n\n") + "[attached: \(attachments.joined(separator: ", "))]" }
+            guard !body.isEmpty else { return nil }
+            return (message["sender"] as? String) == "human" ? .user(body, nil) : .agent(body, nil)
+        }
+        let name = ((json["name"] as? String) ?? chat.name).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (name.isEmpty ? chat.displayName : name, steps)
+    }
+
     // MARK: Export
 
     private struct Export {
