@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var refreshTimer: Timer?
     private var refreshInFlight = false
     private var updateTimer: Timer?
+    /// Redraws the menu bar each minute so reset countdowns ("7m") stay current
+    /// between usage refreshes.
+    private var countdownTimer: Timer?
     private var updateInFlight = false
     /// A newer release we've found but not installed yet.
     private var pendingUpdate: AppRelease?
@@ -39,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         scheduleRefreshTimer()
         scheduleUpdateChecks()
         watchClaudeInstances()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.updateStatusIcon()
+        }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -203,20 +209,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     /// Flipped from the switch on an account card, with the menu still open. Applies the
-    /// same rule as Settings - at most two accounts, the newest one bumps the oldest -
+    /// same rule as Settings - up to the grid's size, the newest one bumps the oldest -
     /// and updates the menu bar and the other cards in place instead of rebuilding the
     /// menu under the cursor.
     private func setMenuBar(_ id: String, shown: Bool) {
-        var ids = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
-        if shown {
-            if !ids.contains(id) { ids.append(id) }
-            if ids.count > 2 { ids.removeFirst(ids.count - 2) }
-        } else {
-            ids.removeAll { $0 == id }
-        }
-        config.menuBarProfileIDs = ids
-        config.menuBarProfileID = ids.first
-        config.showPercentInMenuBar = !ids.isEmpty
+        config.setMenuBar(id, shown: shown)
+        let ids = config.menuBarProfileIDList
         ConfigStore.shared.save(config)
         updateStatusIcon()
         settingsWindow?.syncConfig(config)
@@ -301,17 +299,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
 
-        // When showing percentages, draw up to two stacked rows (app icon + 5h %) so
-        // it's clear which account each number belongs to. Otherwise show the glyph.
-        let badgeRows: [MenuBarBadge.Row] = config.menuBarProfileIDList.compactMap { id in
-            guard let profile = config.profiles.first(where: { $0.id == id }),
-                  let percent = ProfileFormatting.primaryUsagePercent(for: profile) else { return nil }
-            let icon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
-            return MenuBarBadge.Row(icon: icon, percent: percent)
-        }
-
-        if config.showsPercentInMenuBar, !badgeRows.isEmpty {
-            button.image = MenuBarBadge.image(rows: badgeRows)
+        // When showing percentages, draw the pinned accounts in the chosen grid (app
+        // icon + 5h %, optionally a label on the icon) so it's clear which account each
+        // number belongs to. Otherwise show the glyph.
+        if config.showsPercentInMenuBar, let image = MenuBarBadge.image(for: config) {
+            button.image = image
         } else {
             let percent = ProfileFormatting.menuBarPercent(in: config.profiles, selectedID: config.menuBarProfileID)
             button.image = MenuBarIcon.make(usagePercent: percent, isRefreshing: refreshInFlight)

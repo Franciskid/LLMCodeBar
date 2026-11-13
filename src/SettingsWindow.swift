@@ -23,13 +23,28 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let providerPopup = NSPopUpButton()
     private let advancedToggle = NSButton()
     private let advancedStack = NSStackView()
+    private let iconLabelField = NSTextField()
+    private let iconLabelDefault = NSTextField(labelWithString: "")
+
+    // Menu-bar layout controls.
+    private let gridPicker = MenuBarGridPicker()
+    private let gridLabel = NSTextField(labelWithString: "")
+    private let orderPopup = NSPopUpButton()
+    private let showIconLabels = NSButton(checkboxWithTitle: "Show a label on each app icon", target: nil, action: nil)
+    private let previewImage = NSImageView()
+    private let previewEmpty = NSTextField(labelWithString: "Nothing pinned yet")
+    private let capacityHelp = NSTextField(labelWithString: "")
+    private let showWeekly = NSButton(checkboxWithTitle: "Weekly %", target: nil, action: nil)
+    private let resetTimesPopup = NSPopUpButton()
+    private let arrangePopup = NSPopUpButton()
 
     private let accountPage = NSStackView()
     private let generalPage = NSStackView()
-    private let pagePicker = NSSegmentedControl(labels: ["General", "Account"], trackingMode: .selectOne, target: nil, action: nil)
+    private let pages = NSTabView()
+    private let menuBarPage = NSStackView()
     private let showLabels = NSButton(checkboxWithTitle: "Show limit labels and percentages", target: nil, action: nil)
     private let showSession = NSButton(checkboxWithTitle: "Show session (5 hour) limit", target: nil, action: nil)
-    private let showWeekly = NSButton(checkboxWithTitle: "Show weekly (7 day) limits", target: nil, action: nil)
+    private let showWeeklyLimits = NSButton(checkboxWithTitle: "Show weekly (7 day) limits", target: nil, action: nil)
     private let showResets = NSButton(checkboxWithTitle: "Show reset times", target: nil, action: nil)
     private let resetAlerts = NSPopUpButton()
 
@@ -56,17 +71,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.onChange = onChange
         self.onCheckForUpdates = onCheckForUpdates
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 610),
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
         window.title = "LLMCodeBar Settings"
+        window.minSize = NSSize(width: 900, height: 580)
         window.center()
         super.init(window: window)
         buildUI()
         loadSelection()
-        pagePicker.selectedSegment = 0
-        pageChanged()
+        pages.selectTabViewItem(at: 0)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -77,19 +92,43 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = NSTableCellView()
-        let text = NSTextField(labelWithString: config.profiles[row].label)
+        let profile = config.profiles[row]
+        let text = NSTextField(labelWithString: profile.label)
         text.translatesAutoresizingMaskIntoConstraints = false
         text.lineBreakMode = .byTruncatingTail
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         cell.addSubview(text)
         NSLayoutConstraint.activate([
             text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
+        // Its place in the menu-bar grid, when it's pinned there.
+        let pinned = config.showsPercentInMenuBar ? config.menuBarProfileIDList : []
+        if let place = pinned.firstIndex(of: profile.id) {
+            let badge = NSTextField(labelWithString: "\(place + 1)")
+            badge.font = .systemFont(ofSize: 10, weight: .bold)
+            badge.textColor = .controlAccentColor
+            badge.alignment = .center
+            badge.wantsLayer = true
+            badge.layer?.cornerRadius = 8
+            badge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.15).cgColor
+            badge.toolTip = "Place \(place + 1) in the menu bar"
+            badge.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(badge)
+            NSLayoutConstraint.activate([
+                badge.widthAnchor.constraint(equalToConstant: 16),
+                badge.heightAnchor.constraint(equalToConstant: 16),
+                badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -6),
+            ])
+        } else {
+            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -8).isActive = true
+        }
         return cell
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection(); pagePicker.selectedSegment = 1; pageChanged() }
+    func tableViewSelectionDidChange(_ notification: Notification) { loadSelection(); pages.selectTabViewItem(at: 2) }
 
     // MARK: Immediate apply
 
@@ -99,7 +138,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         config.menuBarProfileIDs = newConfig.menuBarProfileIDs
         config.menuBarProfileID = newConfig.menuBarProfileID
         config.showPercentInMenuBar = newConfig.showPercentInMenuBar
+        let id = selectedID
+        table.reloadData()
+        if let id { restoreSelection(id: id) }
         loadSelection()
+        refreshMenuBarSection()
     }
 
     private func commit(_ mutate: @escaping (inout AppConfig) -> Void) {
@@ -159,60 +202,55 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         leftPane.setCustomSpacing(16, after: rescan)
         scroll.widthAnchor.constraint(equalTo: leftPane.widthAnchor).isActive = true
 
-        // Right: account section + General section.
-        let form = NSStackView()
-        form.translatesAutoresizingMaskIntoConstraints = false
-        form.orientation = .vertical
-        form.spacing = 10
-        form.alignment = .leading
-
-        pagePicker.selectedSegment = 0
-        pagePicker.target = self
-        pagePicker.action = #selector(pageChanged)
-        form.addArrangedSubview(pagePicker)
-        for page in [accountPage, generalPage] {
+        // Each destination owns a complete page; account selection opens Account.
+        pages.translatesAutoresizingMaskIntoConstraints = false
+        for (title, page) in [("General", generalPage), ("Menu bar", menuBarPage), ("Account", accountPage)] {
             page.orientation = .vertical
             page.alignment = .leading
-            page.spacing = 10
-            form.addArrangedSubview(page)
+            page.spacing = 12
+            page.translatesAutoresizingMaskIntoConstraints = false
+            let item = NSTabViewItem(identifier: title)
+            item.label = title
+            let scroll = NSScrollView()
+            scroll.hasVerticalScroller = true
+            scroll.drawsBackground = false
+            let document = FlippedView()
+            document.translatesAutoresizingMaskIntoConstraints = false
+            document.addSubview(page)
+            scroll.documentView = document
+            item.view = scroll
+            pages.addTabViewItem(item)
+            NSLayoutConstraint.activate([
+                document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+                page.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
+                page.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
+                page.topAnchor.constraint(equalTo: document.topAnchor, constant: 20),
+                page.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -20),
+            ])
         }
-        buildAccountSection(into: accountPage)
         buildGeneralSection(into: generalPage)
-        pageChanged()
+        buildMenuBarSection(into: menuBarPage)
+        buildAccountSection(into: accountPage)
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 11)
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.usesSingleLineMode = false
-        statusLabel.cell?.wraps = true
-        statusLabel.maximumNumberOfLines = 3
-        statusLabel.preferredMaxLayoutWidth = 420
-        form.setCustomSpacing(14, after: form.arrangedSubviews.last!)
-        form.addArrangedSubview(statusLabel)
-
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(leftPane)
-        let formScroll = NSScrollView()
-        formScroll.translatesAutoresizingMaskIntoConstraints = false
-        formScroll.hasVerticalScroller = true
-        let document = FlippedView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(form)
-        formScroll.documentView = document
-        content.addSubview(formScroll)
+        content.addSubview(pages)
+        content.addSubview(statusLabel)
         NSLayoutConstraint.activate([
             leftPane.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            leftPane.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
-            leftPane.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            leftPane.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            leftPane.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             leftPane.widthAnchor.constraint(equalToConstant: 220),
-            formScroll.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
-            formScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            formScroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
-            formScroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-            document.widthAnchor.constraint(equalTo: formScroll.contentView.widthAnchor),
-            form.leadingAnchor.constraint(equalTo: document.leadingAnchor),
-            form.trailingAnchor.constraint(equalTo: document.trailingAnchor),
-            form.topAnchor.constraint(equalTo: document.topAnchor),
-            form.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12),
+            pages.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor, constant: 20),
+            pages.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            pages.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            pages.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
+            statusLabel.leadingAnchor.constraint(equalTo: pages.leadingAnchor, constant: 8),
+            statusLabel.trailingAnchor.constraint(equalTo: pages.trailingAnchor, constant: -8),
+            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
         ])
         if !config.profiles.isEmpty {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -230,7 +268,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         menuBarAccount.target = self
         menuBarAccount.action = #selector(menuBarAccountChanged)
-        menuBarAccount.toolTip = "Show this account's 5h session % in the menu bar, with its app icon. You can show up to 2 accounts, stacked one above the other."
+        menuBarAccount.toolTip = "Show this account's 5h session % in the menu bar, with its app icon. How many fit, and how they're laid out, is set on the Menu bar page."
+
+        iconLabelField.delegate = self
+        iconLabelField.placeholderString = ""
+        iconLabelField.toolTip = "Up to 3 characters, drawn on this account's app icon in the menu bar when \"Show a label on each app icon\" is on. Leave it empty for the first 2 characters of the email."
+        iconLabelField.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        iconLabelDefault.font = .systemFont(ofSize: 11)
+        iconLabelDefault.textColor = .tertiaryLabelColor
+        let iconLabelRow = NSStackView(views: [NSTextField(labelWithString: "Icon label"), iconLabelField, iconLabelDefault])
+        iconLabelRow.orientation = .horizontal
+        iconLabelRow.spacing = 8
 
         autoStartSession.target = self
         autoStartSession.action = #selector(autoStartChanged)
@@ -270,8 +318,11 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         form.addArrangedSubview(header)
         form.setCustomSpacing(12, after: header)
+        form.addArrangedSubview(sectionHeading("Menu bar identity"))
         form.addArrangedSubview(menuBarAccount)
-        for control in [showSparklines, showLabels, showSession, showWeekly, showResets] {
+        form.addArrangedSubview(iconLabelRow)
+        form.addArrangedSubview(sectionHeading("Usage display"))
+        for control in [showSparklines, showLabels, showSession, showWeeklyLimits, showResets] {
             control.target = self
             control.action = #selector(displayChanged)
             form.addArrangedSubview(control)
@@ -281,11 +332,163 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         resetAlerts.action = #selector(displayChanged)
         let alertRow = NSStackView(views: [NSTextField(labelWithString: "Reset reminder"), resetAlerts])
         alertRow.spacing = 8
+        form.addArrangedSubview(sectionHeading("Reset reminders"))
         form.addArrangedSubview(alertRow)
+        form.addArrangedSubview(sectionHeading("Session start"))
         form.addArrangedSubview(autoStartRow)
         form.addArrangedSubview(autoStartHelp)
         form.addArrangedSubview(advancedHeader)
         form.addArrangedSubview(advancedStack)
+    }
+
+    private func buildMenuBarSection(into form: NSStackView) {
+        let title = NSTextField(labelWithString: "Menu bar")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        gridPicker.toolTip = "How many rows and columns of accounts the menu bar shows, up to 3 by 3."
+        gridPicker.onHover = { [weak self] size in self?.showGridLabel(size) }
+        gridPicker.onPick = { [weak self] rows, columns in self?.gridPicked(rows: rows, columns: columns) }
+        gridLabel.font = .systemFont(ofSize: 11)
+        gridLabel.textColor = .secondaryLabelColor
+        orderPopup.addItems(withTitles: ["Down each column, then the next column", "Along the top row, then the next row"])
+        orderPopup.target = self
+        orderPopup.action = #selector(orderChanged)
+        orderPopup.toolTip = "Which way the pinned accounts fill the grid, in the order you pinned them."
+        capacityHelp.font = .systemFont(ofSize: 10.5)
+        capacityHelp.textColor = .tertiaryLabelColor
+        // The size, the fill order and the capacity sit beside the picker to keep the
+        // window short enough for a laptop screen.
+        let gridSide = NSStackView(views: [gridLabel, orderPopup, capacityHelp])
+        gridSide.orientation = .vertical
+        gridSide.alignment = .leading
+        gridSide.spacing = 5
+        let layoutLabel = NSTextField(labelWithString: "Layout")
+        let layoutRow = NSStackView(views: [layoutLabel, gridPicker, gridSide])
+        layoutRow.orientation = .horizontal
+        layoutRow.alignment = .top
+        layoutRow.spacing = 8
+
+        showWeekly.target = self
+        showWeekly.action = #selector(oneRowDetailsChanged)
+        showWeekly.toolTip = "Also show each account's weekly usage %."
+        resetTimesPopup.addItems(withTitles: MenuBarResetTimes.allCases.map(\.title))
+        resetTimesPopup.target = self
+        resetTimesPopup.action = #selector(oneRowDetailsChanged)
+        resetTimesPopup.toolTip = "How long until the 5h and weekly limits reset, in one unit: 3d, then 4h, then 7m."
+        arrangePopup.addItems(withTitles: ["Stacked: 5h above weekly", "Side by side"])
+        arrangePopup.target = self
+        arrangePopup.action = #selector(oneRowDetailsChanged)
+        let oneRowRow = NSStackView(views: [NSTextField(labelWithString: "On one row"), showWeekly,
+                                            NSTextField(labelWithString: "Time to reset"), resetTimesPopup])
+        oneRowRow.orientation = .horizontal
+        oneRowRow.spacing = 8
+        oneRowRow.setCustomSpacing(16, after: showWeekly)
+        let arrangeRow = NSStackView(views: [NSTextField(labelWithString: "Arrange"), arrangePopup])
+        arrangeRow.orientation = .horizontal
+        arrangeRow.spacing = 8
+        let oneRowHelp = helpLabel("When the accounts fit on one row (a 1-row layout, or one account pinned). With 2 or 3 rows only the 5h % fits.")
+
+        showIconLabels.target = self
+        showIconLabels.action = #selector(showIconLabelsChanged)
+        showIconLabels.toolTip = "Draws a short label (set on the Account page) on each app icon in the menu bar, so two accounts of the same app can be told apart."
+        let labelsHelp = helpLabel("Each account's label is set on its Account page. Left empty, it's the first 2 characters of the email.")
+
+        previewImage.imageScaling = .scaleNone
+        previewEmpty.font = .systemFont(ofSize: 11)
+        previewEmpty.textColor = .tertiaryLabelColor
+        let previewBox = AppearanceAwareStack(views: [previewImage, previewEmpty])
+        previewBox.orientation = .horizontal
+        previewBox.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+        previewBox.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        let previewRow = NSStackView(views: [NSTextField(labelWithString: "Preview"), previewBox])
+        previewRow.orientation = .horizontal
+        previewRow.spacing = 8
+
+        form.addArrangedSubview(title)
+        form.addArrangedSubview(layoutRow)
+        form.addArrangedSubview(oneRowRow)
+        form.addArrangedSubview(arrangeRow)
+        form.addArrangedSubview(oneRowHelp)
+        form.addArrangedSubview(showIconLabels)
+        form.addArrangedSubview(labelsHelp)
+        form.addArrangedSubview(previewRow)
+        refreshMenuBarSection()
+    }
+
+    /// Puts the menu-bar section in step with `config`.
+    private func refreshMenuBarSection() {
+        gridPicker.rows = config.menuBarGridRows
+        gridPicker.columns = config.menuBarGridColumns
+        showGridLabel(nil)
+        orderPopup.selectItem(at: config.fillsMenuBarRowsFirst ? 1 : 0)
+        orderPopup.isEnabled = config.menuBarGridRows > 1 && config.menuBarGridColumns > 1
+        showIconLabels.state = config.showsMenuBarLabels ? .on : .off
+        iconLabelField.isEnabled = selectedID != nil && config.showsMenuBarLabels
+        showWeekly.state = config.showsMenuBarWeekly ? .on : .off
+        resetTimesPopup.selectItem(at: MenuBarResetTimes.allCases.firstIndex(of: config.menuBarResets) ?? 0)
+        arrangePopup.selectItem(at: config.menuBarDetailsSideBySide ? 1 : 0)
+        // Stacked or side by side only matters when there's a weekly line to place.
+        arrangePopup.isEnabled = config.showsMenuBarWeekly || config.menuBarResets.showsWeekly
+        let capacity = config.menuBarCapacity
+        capacityHelp.stringValue = capacity == 1
+            ? "Pinning another account replaces it."
+            : "When full, pinning another unpins the oldest."
+        let image = config.showsPercentInMenuBar ? MenuBarBadge.image(for: config) : nil
+        previewImage.image = image
+        previewImage.isHidden = image == nil
+        previewEmpty.isHidden = image != nil
+    }
+
+    private func showGridLabel(_ size: (rows: Int, columns: Int)?) {
+        let rows = size?.rows ?? config.menuBarGridRows
+        let columns = size?.columns ?? config.menuBarGridColumns
+        let count = rows * columns
+        gridLabel.stringValue = "\(rows) row\(rows == 1 ? "" : "s") × \(columns) column\(columns == 1 ? "" : "s") · up to \(count) account\(count == 1 ? "" : "s")"
+            + (size == nil ? "" : " (click to use)")
+    }
+
+    private func gridPicked(rows: Int, columns: Int) {
+        var unpinned: [String] = []
+        commit { cfg in unpinned = cfg.setMenuBarGrid(rows: rows, columns: columns) }
+        reloadAccountList()
+        refreshMenuBarSection()
+        statusLabel.stringValue = unpinned.isEmpty ? "" :
+            "Unpinned \(names(unpinned)) from the menu bar: \(unpinned.count == 1 ? "it no longer fits" : "they no longer fit") in \(rows) × \(columns)."
+    }
+
+    @objc private func orderChanged() {
+        let rowsFirst = orderPopup.indexOfSelectedItem == 1
+        commit { cfg in cfg.menuBarFillRowsFirst = rowsFirst }
+        refreshMenuBarSection()
+    }
+
+    @objc private func oneRowDetailsChanged() {
+        let weekly = showWeekly.state == .on
+        let resets = MenuBarResetTimes.allCases[max(0, resetTimesPopup.indexOfSelectedItem)]
+        let sideBySide = arrangePopup.indexOfSelectedItem == 1
+        commit { cfg in
+            cfg.menuBarShowWeekly = weekly
+            cfg.menuBarResetTimes = resets
+            cfg.menuBarSideBySide = sideBySide
+        }
+        refreshMenuBarSection()
+    }
+
+    @objc private func showIconLabelsChanged() {
+        let on = showIconLabels.state == .on
+        commit { cfg in cfg.showMenuBarLabels = on }
+        refreshMenuBarSection()
+    }
+
+    private func names(_ ids: [String]) -> String {
+        ids.compactMap { id in config.profiles.first { $0.id == id }?.label }.joined(separator: " and ")
+    }
+
+    /// Redraws the account list (its menu-bar place numbers) keeping the selection.
+    private func reloadAccountList() {
+        let id = selectedID
+        table.reloadData()
+        if let id { restoreSelection(id: id) }
     }
 
     private func buildGeneralSection(into form: NSStackView) {
@@ -346,14 +549,24 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         form.addArrangedSubview(title)
         form.addArrangedSubview(launchAtLogin)
         form.addArrangedSubview(refreshRow)
+        form.addArrangedSubview(sectionHeading("Account access"))
         form.addArrangedSubview(autoApproveCookies)
         form.addArrangedSubview(cookiesHelp)
+        form.addArrangedSubview(sectionHeading("Updates"))
         form.addArrangedSubview(autoUpdate)
+        form.addArrangedSubview(sectionHeading("Claude windows"))
         form.addArrangedSubview(routeClaudeLinks)
         form.addArrangedSubview(routeHelp)
         form.addArrangedSubview(offerClaudeUpdates)
         form.addArrangedSubview(claudeUpdateHelp)
         form.addArrangedSubview(versionRow)
+    }
+
+    private func sectionHeading(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
     }
 
     private func divider() -> NSView {
@@ -398,10 +611,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         showSparklines.state = (profile.showSparklines ?? config.showsSparklines) ? .on : .off
         showLabels.state = (profile.showLabels ?? true) ? .on : .off
         showSession.state = (profile.showSessionWindow ?? true) ? .on : .off
-        showWeekly.state = (profile.showWeeklyWindows ?? true) ? .on : .off
+        showWeeklyLimits.state = (profile.showWeeklyWindows ?? true) ? .on : .off
         showResets.state = (profile.showResetTimes ?? true) ? .on : .off
         resetAlerts.selectItem(at: [0, 5, 15, 30, 60].firstIndex(of: profile.resetAlertMinutes ?? 0) ?? 0)
-        let accountControls = [showSparklines, showLabels, showSession, showWeekly, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
+        let accountControls = [showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
 
         labelField.stringValue = profile.label
@@ -410,6 +623,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         dataDirField.stringValue = profile.dataDir
 
         menuBarAccount.state = (config.menuBarProfileIDList.contains(profile.id) && config.showsPercentInMenuBar) ? .on : .off
+        iconLabelField.stringValue = profile.menuBarLabel ?? ""
+        iconLabelField.placeholderString = profile.defaultMenuBarLabel
+        iconLabelField.isEnabled = config.showsMenuBarLabels
+        iconLabelDefault.stringValue = config.showsMenuBarLabels
+            ? (profile.defaultMenuBarLabel.isEmpty ? "No email yet" : "Empty = \(profile.defaultMenuBarLabel), the first 2 characters of the email")
+            : "Turn on \"Show a label on each app icon\" below to use it"
 
         let signedIn = profile.signedIn == true
         autoStartSession.isEnabled = signedIn
@@ -435,19 +654,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [showSparklines, showLabels, showSession, showWeekly, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField].forEach { $0.isEnabled = false }
+        [showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, advancedToggle, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
+        iconLabelField.stringValue = ""
+        iconLabelDefault.stringValue = ""
         autoStartSession.state = .off
-    }
-
-    @objc private func pageChanged() {
-        accountPage.isHidden = pagePicker.selectedSegment == 0
-        generalPage.isHidden = pagePicker.selectedSegment != 0
     }
 
     @objc private func displayChanged() {
         guard let id = selectedID else { return }
-        let values = [showSparklines, showLabels, showSession, showWeekly, showResets].map { $0.state == .on }
+        let values = [showSparklines, showLabels, showSession, showWeeklyLimits, showResets].map { $0.state == .on }
         let minutes = [0, 5, 15, 30, 60][max(0, resetAlerts.indexOfSelectedItem)]
         commit { cfg in
             guard let i = cfg.profiles.firstIndex(where: { $0.id == id }) else { return }
@@ -466,19 +682,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func menuBarAccountChanged() {
         guard let id = selectedID else { return }
         let on = menuBarAccount.state == .on
-        commit { cfg in
-            var ids = cfg.menuBarProfileIDList
-            if on {
-                if !ids.contains(id) { ids.append(id) }
-                // Cap at 2: keep the newly checked account and drop the oldest.
-                if ids.count > 2 { ids.removeFirst(ids.count - 2) }
-            } else {
-                ids.removeAll { $0 == id }
-            }
-            cfg.menuBarProfileIDs = ids
-            cfg.menuBarProfileID = ids.first
-            cfg.showPercentInMenuBar = !ids.isEmpty
+        var bumped: [String] = []
+        commit { cfg in bumped = cfg.setMenuBar(id, shown: on) }
+        reloadAccountList()
+        refreshMenuBarSection()
+        statusLabel.stringValue = bumped.isEmpty ? "" :
+            "Unpinned \(names(bumped)) to make room: the menu bar holds \(config.menuBarCapacity)."
+    }
+
+    /// Keeps the icon label to 3 characters and applies it as it's typed.
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSTextField) === iconLabelField, let id = selectedID else { return }
+        if iconLabelField.stringValue.count > 3 {
+            iconLabelField.stringValue = String(iconLabelField.stringValue.prefix(3))
         }
+        let text = iconLabelField.stringValue.trimmingCharacters(in: .whitespaces)
+        commit { cfg in
+            if let i = cfg.profiles.firstIndex(where: { $0.id == id }) {
+                cfg.profiles[i].menuBarLabel = text.isEmpty ? nil : text
+            }
+        }
+        refreshMenuBarSection()
     }
 
     @objc private func autoStartChanged() {
@@ -501,6 +725,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     func controlTextDidEndEditing(_ notification: Notification) {
         guard let id = selectedID, let field = notification.object as? NSTextField else { return }
+        if field === iconLabelField { return }
         let label = labelField.stringValue, appPath = appPathField.stringValue, dataDir = dataDirField.stringValue
         _ = field
         commit { cfg in
@@ -647,6 +872,30 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         } else {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+    }
+}
+
+/// A rounded, bordered box whose layer colors follow light/dark mode (a layer's
+/// CGColor is fixed when set, so it's re-resolved whenever the appearance changes).
+final class AppearanceAwareStack: NSStackView {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyColors()
+    }
+
+    private func applyColors() {
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.borderWidth = 1
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         }
     }
 }

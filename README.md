@@ -20,7 +20,7 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 - Session (5h) and Weekly bars for every account, with reset times.
 - A 7 day trend line per limit that goes green to red as you get close.
-- Put up to two accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Click the pin next to any account in the dropdown to put it there or take it off, no need to open Settings. Pin a third and the oldest one steps aside.
+- Put accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Click the pin next to any account in the dropdown to put it there or take it off, no need to open Settings. Settings > Menu bar sets the layout, from one account up to a 3 by 3 grid of nine, and can put a short label on each icon (the first 2 characters of the email unless you type your own) to tell two accounts of the same app apart. Pin one more than fits and the oldest one steps aside. When the accounts sit on one row there's room for more: the weekly % and how long until each limit resets (3d, 4h, 7m), stacked 5h above weekly or side by side, each part can be turned off.
 
   <img src="assets/menubar.png" alt="Two accounts' 5h usage in the menu bar" width="72">
 - Each account says whether auto start is on for it, next to its plan. Click anywhere else on an account to open its app.
@@ -77,7 +77,7 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 ## Settings
 
-Settings opens on **General** for app-wide startup, refresh, updates, cookie access, and Claude window integration. Select an account in the sidebar to open its **Account** page. Each account independently controls menu-bar pinning, trendlines, limit labels, session (5 hour) and weekly (7 day) bars, reset times, and auto-start.
+Settings has separate **General**, **Menu bar**, and **Account** pages. General contains app-wide startup, refresh, updates, cookie access, and Claude window integration. Menu bar retains the 1–3 row/column grid, fill order, icon labels, weekly percentage, reset countdowns, stacked/side-by-side arrangement, and live preview. Select an account in the sidebar to open its Account page, including its custom icon label. Each account independently controls menu-bar pinning, trendlines, limit labels, session (5 hour) and weekly (7 day) bars, reset times, and auto-start.
 
 **Reset reminder** is off by default. Choose 5, 15, 30, or 60 minutes before reset for each account and allow macOS notifications when prompted. Reminders use the provider's reset date rather than the refresh timer. A reset with no date cannot generate a reminder. The app must be running to refresh and schedule reminders; macOS notification settings and Focus control their delivery.
 

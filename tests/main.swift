@@ -47,12 +47,28 @@ for quota in quotas {
 let settings = SettingsWindowController(config: AppConfig(launchAtLogin: false, profiles: [profile]), onChange: { _ in }, onCheckForUpdates: { _ in })
 settings.window!.contentView!.layoutSubtreeIfNeeded()
 check(settings.window!.frame.height < 700, "settings stays compact")
-let picker = descendants(settings.window!.contentView!).compactMap { $0 as? NSSegmentedControl }.first!
-check(picker.selectedSegment == 0, "General opens as its own page")
-picker.selectedSegment = 1
-_ = picker.target?.perform(picker.action!, with: picker)
+let pages = descendants(settings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
+check(pages.tabViewItems.map(\.label) == ["General", "Menu bar", "Account"], "General, menu-bar, and account controls each have a page")
+check(pages.selectedTabViewItem?.label == "General", "General opens independently")
+pages.selectTabViewItem(at: 1)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
-check(!descendants(settings.window!.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Show reset times" }!.isHidden, "reset toggle is on account page")
+let menuControls = descendants(pages.tabViewItems[1].view!)
+check(menuControls.contains { $0 is MenuBarGridPicker }, "menu-bar grid picker is preserved")
+check(menuControls.contains { ($0 as? NSButton)?.title == "Show a label on each app icon" }, "icon label toggle is preserved")
+check(menuControls.contains { ($0 as? NSButton)?.title == "Weekly %" }, "weekly menu-bar setting is preserved")
+check(menuControls.compactMap { $0 as? NSPopUpButton }.contains { $0.itemTitles.contains("Side by side") }, "arrangement control is preserved")
+pages.selectTabViewItem(at: 2)
+settings.window!.contentView!.layoutSubtreeIfNeeded()
+check(descendants(pages.tabViewItems[2].view!).contains { ($0 as? NSButton)?.title == "Show reset times" }, "account reset toggle is preserved")
+var gridConfig = AppConfig(launchAtLogin: false, profiles: [profile])
+gridConfig.setMenuBarGrid(rows: 3, columns: 3)
+for i in 0..<9 { gridConfig.setMenuBar("account-\(i)", shown: true) }
+check(gridConfig.menuBarProfileIDList.count == 9, "nine-account grid capacity is preserved")
+gridConfig.menuBarResetTimes = .both
+gridConfig.menuBarSideBySide = true
+gridConfig.showMenuBarLabels = true
+let roundTrip = try JSONDecoder().decode(AppConfig.self, from: JSONEncoder().encode(gridConfig))
+check(roundTrip.menuBarCapacity == 9 && roundTrip.menuBarResets == .both && roundTrip.menuBarDetailsSideBySide && roundTrip.showsMenuBarLabels, "all recovered menu-bar options persist")
 
 let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
 defer { try? FileManager.default.removeItem(at: fixture) }
