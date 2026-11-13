@@ -2,7 +2,7 @@
 
 > Your Claude and ChatGPT limits in the menu bar. Built for running several accounts of the same provider, and auto starting your 5 hour session.
 
-<img src="assets/screenshot.png" alt="LLMCodeBar open from the menu bar, with two Claude accounts and a ChatGPT one" width="560">
+<img src="assets/screenshot.png" alt="LLMCodeBar open from the menu bar: two Claude accounts and a ChatGPT one grouped by app, with their limits, trend lines and manual resets" width="560">
 
 ## Why this one
 
@@ -12,7 +12,7 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 **Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude and ChatGPT, per account.
 
-**Take a session to another account, or to the other agent.** Hit your limit mid task and you don't have to start over. Open **Transfer session...**, search your chats, Code sessions and Codex threads, pick where it goes, and carry on there with everything that was already said. That works between two Claude accounts, and between Claude Code and Codex in either direction.
+**Take a session to another account, or to the other agent.** Hit your limit mid task and you don't have to start over. Open **Transfer session...**, search your chats, Code sessions and Codex threads, pick where it goes, and carry on there with everything that was already said. That works between two Claude accounts, between Claude Code and Codex in either direction, and from any of them into a new T3 Code thread.
 
 ![The transfer window, moving a Code session between two Claude accounts](assets/transfer.png)
 
@@ -30,7 +30,7 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 - Keeps your Code history where you can find it. Claude files each Code session under the window it was created in, so when a re-login puts an account in your *other* Claude window, its whole history looks gone - it isn't, that window just has an empty folder for it. LLMCodeBar keeps every account's sessions present in every window, and offers to restart a window that has to reload them. It never overwrites a session the running app owns, and a session you delete stays deleted.
 - Signs you in to the window you asked. With two Claude windows open, macOS hands a browser sign-in back to whichever one it likes, and the other one rejects it. LLMCodeBar holds the `claude://` link type, which makes Claude sign in inside its own window instead of sending you to the browser. Turn it off in Settings to hand the links back.
 - Launch at login.
-- Updates itself. It checks the releases page in the background, and installs a new version and restarts on its own. Turn that off in Settings and it offers the update in the menu instead.
+- Updates itself. It checks the releases page in the background, and installs a new version and restarts on its own. Turn that off in Settings and it offers the update in the menu instead. Every release is signed with the project's own key (not an Apple certificate), and an update whose signature doesn't check out is never installed.
 
 ## About transferring sessions
 
@@ -63,9 +63,13 @@ Each kind travels differently, because each one is stored somewhere very differe
 
 ![Copying a Codex thread into Claude Code](assets/transfer-codex.png)
 
+**Anything can start a T3 Code thread.** Pick **T3 Code · New thread** as the destination for a chat, a Code session or a Codex thread. T3 has no way to take over another app's session, so LLMCodeBar starts a new thread in the session's folder (a chat asks you for one) and gives it the conversation as its first message, like T3 does itself when a thread changes provider. The agent reads it, sums up where things stand and waits for you. A long conversation keeps its first message and as much of the end as fits. It goes through T3's own `t3` command, so T3 Code has to be open, and a folder T3 doesn't know yet is added as a project.
+
 ## Keeping work going past a limit
 
 Tick **Continue after limits** in the menu (or in Settings > Continue after limits) and a Claude Code session that reaches a usage limit carries on by itself. The chevron next to the checkbox opens the list of your sessions from the last 3 hours, right in the menu: what each one is doing (working, idle, waiting for reset, moving, sending, needs you) and what happens at its limit.
+
+![The Continue after limits page in Settings](assets/continue.png)
 
 What happens is up to you, per session or for all of them (the gear opens the defaults):
 
@@ -93,13 +97,13 @@ ChatGPT accounts can be picked as the place to move one session to. LLMCodeBar i
 
 Download **LLMCodeBar.dmg** from the [latest release](https://github.com/Franciskid/LLMCodeBar/releases/latest), open it, drag the app to Applications.
 
-It's unsigned (no paid Apple Developer ID), so macOS blocks the first launch. Right click the app and pick Open, or run:
+It isn't notarized (that needs a paid Apple Developer ID), so macOS blocks the first launch. Right click the app and pick Open, or run:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/LLMCodeBar.app"
 ```
 
-That first launch is the only time you have to do this. From then on LLMCodeBar keeps itself up to date: it checks for a new release in the background, swaps itself out and restarts, quarantine flag and all.
+That first launch is the only time you have to do this. From then on LLMCodeBar keeps itself up to date: it checks for a new release in the background, checks its signature, swaps itself out and restarts, quarantine flag and all.
 
 macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude and/or ChatGPT desktop apps installed and signed in.
 
@@ -115,7 +119,9 @@ On an account’s **Display** section, **Show in menu** controls manual-reset vi
 
 ### T3 Code transfers
 
-Choose **Transfer session… → From → T3 Code · Local conversations**, then select a Claude or ChatGPT account. Search the list, select a thread, and copy it to Claude Code or Codex. Copying reads completed user and assistant messages from the local T3 V2 database (`~/.t3/userdata/statev2.sqlite`) without modifying T3. The working directory and message order are preserved. Claude Code receives a new transcript; Codex receives a translated transcript through its own importer. Both continue independently from the T3 conversation.
+Into T3: choose an account as the source, then **T3 Code · New thread** as the destination (see above).
+
+Out of T3: choose **Transfer session… → From → T3 Code · Local conversations**, then select a Claude or ChatGPT account. Search the list, select a thread, and copy it to Claude Code or Codex. Copying reads completed user and assistant messages from the local T3 V2 database (`~/.t3/userdata/statev2.sqlite`) without modifying T3. The working directory and message order are preserved. Claude Code receives a new transcript; Codex receives a translated transcript through its own importer. Both continue independently from the T3 conversation.
 
 Attachments, tool executions, pending replies, hidden reasoning, and provider session state are not copied. Review the destination's history before continuing; project files remain in their original working directory. Remote environments, custom T3 data directories, and legacy V1 databases are not supported in this release. T3 has no whole-thread export command; this adapter uses its current local projection schema and reports an error if that schema changes. See [T3's migration and storage documentation](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md).
 
@@ -143,6 +149,8 @@ cd LLMCodeBar
 ```
 
 Plain Swift and AppKit, no Xcode project, no deps.
+
+`./scripts/test.sh` runs the checks. `./scripts/release.sh notes.md` builds the version in `Info.plist`, signs the disk image with the update key from your login keychain (no Apple account involved), checks the signature and publishes the release.
 
 ## License
 
