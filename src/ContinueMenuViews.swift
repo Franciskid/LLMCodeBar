@@ -324,7 +324,11 @@ final class AccountsFoldView: NSView {
         }
         self.fullCap = cards > maxFullCards ? fullCap : .greatestFiniteMagnitude
         self.entries = all
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: all.reduce(0) { $0 + $1.full }))
+        // Evaluate the reduction before super.init. With Swift 6.1.2's release
+        // optimizer, an inline closure here leaves this view retained by AppKit's
+        // notification machinery, along with every card and its history arrays.
+        let initialHeight = all.reduce(CGFloat(0)) { $0 + $1.full }
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: initialHeight))
         for entry in all { document.addSubview(entry.clip) }
         if cards > maxFullCards {
             let scroll = NSScrollView(frame: bounds)

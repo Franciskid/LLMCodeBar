@@ -13,7 +13,10 @@ for test in "$ROOT"/tests/*.swift; do
   name="$(basename "$test" .swift)"
   mkdir -p "$OUT/$name"
   cp "$test" "$OUT/$name/main.swift"
-  swiftc -suppress-warnings -module-cache-path "$ROOT/.build/module-cache" -framework AppKit -framework Foundation -framework Security \
+  # The menu-retention regression only reproduces with release optimization.
+  OPTIMIZATION=(-Onone)
+  [[ "$name" == MemoryScenarios ]] && OPTIMIZATION=(-O)
+  swiftc "${OPTIMIZATION[@]}" -suppress-warnings -module-cache-path "$ROOT/.build/module-cache" -framework AppKit -framework Foundation -framework Security \
     "${SOURCES[@]}" "$OUT/$name/main.swift" -o "$OUT/$name/run"
   if [[ "$name" == main ]]; then (cd "$ROOT" && "$OUT/$name/run" "$@"); else (cd "$ROOT" && "$OUT/$name/run"); fi
 done
