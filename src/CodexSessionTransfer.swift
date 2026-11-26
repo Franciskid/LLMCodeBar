@@ -264,6 +264,69 @@ enum CodexSessionTransfer {
         return (response?["data"] as? [[String: Any]]) ?? []
     }
 
+    // MARK: Usage and 5h start through the Codex CLI
+
+    /// Whether this account can be handled by the official Codex CLI. When it can,
+    /// LLMCodeBar never calls ChatGPT's backend itself.
+    static func hasCLI(for profile: LaunchProfile) -> Bool {
+        codexExecutable(for: profile) != nil
+    }
+
+    /// The account's rate limits, reset credits and credit balance, read by Codex itself
+    /// (`account/rateLimits/read`). Codex refreshes its own login as needed.
+    static func rateLimits(for profile: LaunchProfile) throws -> [String: Any] {
+        let server = try startServer(for: profile)
+        defer { server.stop() }
+        return try server.request("account/rateLimits/read", params: [:], timeout: 40)
+    }
+
+    /// Sends "hi" in a throwaway Codex thread so the account's 5-hour window starts.
+    /// The thread is ephemeral (Codex never saves it, so it doesn't show up in the
+    /// ChatGPT app), read-only, and can't run anything. Models are tried in order until
+    /// one is accepted, then the account's default. Returns the model that answered.
+    static func sendThrowawayHi(for profile: LaunchProfile, models: [String]) throws -> String {
+        let server = try startServer(for: profile)
+        defer { server.stop() }
+        let workdir = FileManager.default.temporaryDirectory.appendingPathComponent("LLMCodeBar-session-start", isDirectory: true)
+        try? FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
+
+        var lastError = "Codex didn't accept any model."
+        let candidates: [String?] = models.map { $0 } + [nil]
+        for model in candidates {
+            var params: [String: Any] = [
+                "ephemeral": true,
+                "cwd": workdir.path,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+            ]
+            if let model { params["model"] = model }
+            do {
+                let started = try server.request("thread/start", params: params, timeout: 60)
+                guard let threadID = (started["thread"] as? [String: Any])?["id"] as? String else {
+                    throw error("Codex didn't return a thread.")
+                }
+                _ = try server.request("turn/start", params: [
+                    "threadId": threadID,
+                    "input": [["type": "text", "text": "hi"]],
+                ], timeout: 60)
+                let completed = try server.waitForNotification("turn/completed", timeout: 180) { params in
+                    (params["threadId"] as? String).map { $0 == threadID } ?? true
+                }
+                let turn = completed["turn"] as? [String: Any]
+                let status = turn?["status"] as? String
+                if status == "completed" {
+                    return model ?? "the account's default model"
+                }
+                lastError = ((turn?["error"] as? [String: Any])?["message"] as? String) ?? "Codex ended the turn (\(status ?? "unknown"))."
+            } catch {
+                lastError = error.localizedDescription
+            }
+            // Only a model the account can't use is worth trying the next one for.
+            if !lastError.lowercased().contains("model") { break }
+        }
+        throw error(lastError)
+    }
+
     private static func previouslyImportedThread(source: URL, codexHome: URL) -> String? {
         let registry = codexHome.appendingPathComponent("external_agent_session_imports.json")
         guard let data = try? Data(contentsOf: registry),

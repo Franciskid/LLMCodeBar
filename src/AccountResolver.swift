@@ -27,6 +27,66 @@ enum AccountResolver {
                 accountUUID: account.accountID
             )
         }
+        if provider == .gemini {
+            let cached = GeminiAuthStore.cachedAccountInfo(dataDir: dataDir)
+            let isDefault = GeminiAuthStore.vaultKey(for: dataDir) == GeminiAuthStore.vaultKey(for: "~/Library/Application Support/Antigravity")
+            let hasCred = GeminiAuthStore.hasVaultedCredential(for: dataDir) || (isDefault && GeminiAuthStore.hasLiveCredential())
+            if let cached {
+                return AccountIdentity(
+                    displayName: cached.name,
+                    email: cached.email,
+                    isSignedIn: hasCred || cached.email != nil,
+                    planName: cached.plan,
+                    quotaSummary: nil,
+                    quotaSource: nil,
+                    billingType: nil,
+                    accountUUID: cached.email
+                )
+            }
+            if hasCred {
+                return AccountIdentity(
+                    displayName: nil,
+                    email: nil,
+                    isSignedIn: true,
+                    planName: nil,
+                    quotaSummary: nil,
+                    quotaSource: nil,
+                    billingType: nil,
+                    accountUUID: nil
+                )
+            }
+            return nil
+        }
+
+        if provider == .mistral {
+            let cached = MistralAuthStore.cachedAccountInfo(dataDir: dataDir)
+            let hasConfig = MistralAuthStore.hasLocalConfig(dataDir: dataDir)
+            if let cached {
+                return AccountIdentity(
+                    displayName: cached.name,
+                    email: cached.email,
+                    isSignedIn: hasConfig || cached.email != nil,
+                    planName: cached.plan,
+                    quotaSummary: nil,
+                    quotaSource: nil,
+                    billingType: nil,
+                    accountUUID: cached.userID ?? cached.email
+                )
+            }
+            if hasConfig {
+                return AccountIdentity(
+                    displayName: nil,
+                    email: nil,
+                    isSignedIn: true,
+                    planName: nil,
+                    quotaSummary: nil,
+                    quotaSource: nil,
+                    billingType: nil,
+                    accountUUID: nil
+                )
+            }
+            return nil
+        }
 
         let root = URL(fileURLWithPath: Launcher.expanding(dataDir))
         let files = relevantFiles(under: root)

@@ -65,6 +65,8 @@ final class ConfigStore {
 
         let claudeApp = "/Applications/Claude.app"
         let codexApp = defaultAppPath(for: .codex)
+        let geminiApp = defaultAppPath(for: .gemini)
+        let mistralApp = defaultAppPath(for: .mistral)
 
         var candidates: [(provider: Provider, appPath: String, dataDir: String, userAdded: Bool)] = []
 
@@ -92,6 +94,16 @@ final class ConfigStore {
             if CodexAuthStore.accountInfo() != nil, !codexDataDirs.contains(where: fm.fileExists(atPath:)) {
                 candidates.append((.codex, codexApp, "\(support)/Codex", false))
             }
+        }
+
+        let geminiDefaultDataDir = "\(support)/Antigravity"
+        if fm.fileExists(atPath: geminiApp) || fm.fileExists(atPath: geminiDefaultDataDir) || GeminiAuthStore.hasLiveCredential() {
+            candidates.append((.gemini, geminiApp, geminiDefaultDataDir, false))
+        }
+
+        let mistralDefaultDataDir = "\(support)/le-chat-desktop"
+        if fm.fileExists(atPath: mistralApp) || fm.fileExists(atPath: mistralDefaultDataDir) || MistralAuthStore.hasLocalConfig(dataDir: mistralDefaultDataDir) {
+            candidates.append((.mistral, mistralApp, mistralDefaultDataDir, false))
         }
 
         candidates.append(contentsOf: generatedProfileCandidates())
@@ -219,6 +231,10 @@ final class ConfigStore {
             if FileManager.default.fileExists(atPath: chatGPT) { return chatGPT }
             if FileManager.default.fileExists(atPath: legacyCodex) { return legacyCodex }
             return chatGPT
+        case .gemini:
+            return GeminiLanguageServer.defaultAppPath
+        case .mistral:
+            return MistralAuthStore.defaultAppPath
         }
     }
 
@@ -252,7 +268,7 @@ final class ConfigStore {
         // them are never duplicates - even when both are signed in to the same account
         // for a while (a re-login landing in the wrong window). Merging them used to
         // make one window vanish and come back later rebuilt from stale caches.
-        if profile.provider == .claude {
+        if profile.provider == .claude || profile.provider == .gemini || profile.provider == .mistral {
             return "\(profile.provider.rawValue)|dir|\(Launcher.expanding(profile.dataDir))"
         }
         if let accountUUID = profile.accountUUID?.lowercased(), !accountUUID.isEmpty {

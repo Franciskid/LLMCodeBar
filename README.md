@@ -1,6 +1,6 @@
 # LLMCodeBar
 
-> Your Claude and ChatGPT limits in the menu bar. Built for running several accounts of the same provider, and auto starting your 5 hour session.
+> Your Claude, ChatGPT, Gemini and Mistral limits in the menu bar. Built for running several accounts of the same provider, and auto starting your 5 hour session.
 
 <img src="assets/screenshot.png" alt="LLMCodeBar open from the menu bar: two Claude accounts and a ChatGPT one grouped by app, with their limits, trend lines and manual resets" width="560">
 
@@ -10,9 +10,9 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 **Run multiple accounts of the same provider.** Personal Claude and work Claude, right next to each other. Two ChatGPT logins. As many as you want, each in its own isolated window so they never clash. Click an account in the dropdown to open Claude or ChatGPT already signed into it.
 
-**Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude and ChatGPT, per account.
+**Auto start your 5 hour session.** The 5 hour window only starts counting from your first message, so an account you're not actively using never starts its clock. Turn this on and LLMCodeBar sends one tiny message on the cheapest model whenever the window is idle, so the session runs on a schedule instead of whenever you remember. Claude, ChatGPT and Gemini (through Antigravity), per account.
 
-**Take a session to another account, or to the other agent.** Hit your limit mid task and you don't have to start over. Open **Transfer session...**, search your chats, Code sessions and Codex threads, pick where it goes, and carry on there with everything that was already said. That works between two Claude accounts, between Claude Code and Codex in either direction, and from any of them into a new T3 Code thread.
+**Take a session to another account, or to the other agent.** Hit your limit mid task and you don't have to start over. Open **Transfer session...**, search your chats, Code sessions, Codex threads, Gemini conversations and Mistral Vibe sessions, pick where it goes, and carry on there with everything that was already said. That works between two Claude accounts, between two Gemini accounts, across Claude Code, Codex, Gemini and Mistral Vibe in any direction, and from any of them into a new T3 Code thread.
 
 ![The transfer window, moving a Code session between two Claude accounts](assets/transfer.png)
 
@@ -130,15 +130,20 @@ Attachments, tool executions, pending replies, hidden reasoning, and provider se
 
 ## How it gets the data
 
-Local and read only, on your own accounts. Nothing leaves your machine except the usual requests to Anthropic and OpenAI.
+Local and read only, on your own accounts. Wherever a provider ships its own tool, LLMCodeBar asks that tool instead of calling the provider's servers itself.
 
-- Reads your signed in Claude and ChatGPT profiles in `~/Library/Application Support` for the account and plan.
-- Claude: your session cookies plus the claude.ai usage endpoint. ChatGPT: the OpenAI login token in `auth.json` plus the ChatGPT usage endpoint.
+- Reads your signed in Claude, ChatGPT, Gemini and Mistral profiles in `~/Library/Application Support` for the account and plan.
+- ChatGPT: usage and reset credits come from the Codex CLI (`codex app-server`, the one bundled with the ChatGPT app or a Homebrew `codex`), which also keeps its own login fresh.
+- Gemini: everything goes through Antigravity's own `language_server`, started with the same flags Antigravity uses.
+- Mistral: the account and monthly budget come from the Vibe CLI (`brew install mistral-vibe`). Accounts the CLI isn't signed in to fall back to chat.mistral.ai with the Vibe app's login.
+- Claude: Claude Code has no way to read usage without sending a message, so this one still reads the claude.ai usage endpoint with your session cookies.
 - Saves a small config and a 7 day usage history for the sparklines.
+
+**Starting a 5h session** goes through the same tools: `claude -p` (Haiku, no tools, nothing saved) for Claude, a throwaway Codex thread that isn't saved for ChatGPT, Antigravity for Gemini. Each Claude account needs a Claude Code login for the same email: LLMCodeBar finds the ones in `~/.claude`, `~/.claude-*` and `~/.claude-t3/*`, and **Settings → Sessions → Claude Code login** opens Terminal to sign in when there's none. Until then, and on a Mac with no Codex CLI, the start falls back to the old direct route and the Activity Log says so.
 
 When Claude isn't running, it decrypts Claude's cookie key and macOS asks for your password once. Click **Always Allow** and it caches the key so it stops asking, or turn off **Auto approve cookie access** in Settings to keep it away from the keychain entirely.
 
-These are the apps' internal endpoints, not official ones, so they can break if the providers change them.
+The claude.ai and fallback endpoints are the apps' internal ones, not official, so they can break if the providers change them.
 
 ## Build
 

@@ -17,6 +17,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let menuBarAccount = NSButton(checkboxWithTitle: "Show this account's 5h % in the menu bar", target: nil, action: nil)
     private let autoStartSession = NSButton(checkboxWithTitle: "Auto-start 5h session for this account", target: nil, action: nil)
     private let startSessionNow = NSButton(title: "Start 5h session now", target: nil, action: nil)
+    private let claudeCodeLogin = NSButton(title: "Sign in to Claude Code…", target: nil, action: nil)
+    /// The "Claude Code login" row and its separator, shown only for Claude accounts.
+    private var claudeCodeLoginRow: [NSView] = []
     private let removeButton = NSButton(title: "Remove account", target: nil, action: nil)
     private let labelField = NSTextField()
     private let appPathField = NSTextField()
@@ -412,7 +415,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         preference("Auto-start 5h session", control: autoStartSession, into: sessionsPage, id: "autoStartSession")
         startSessionNow.target = self; startSessionNow.action = #selector(startSessionNowTapped); startSessionNow.bezelStyle = .rounded
         preference("Start a new session", control: startSessionNow, into: sessionsPage, id: "startSessionNow")
-        sessionsPage.addArrangedSubview(helpLabel("Starts an idle 5h session with a tiny message on the cheapest model. ChatGPT is experimental."))
+        claudeCodeLogin.target = self; claudeCodeLogin.action = #selector(claudeCodeLoginTapped); claudeCodeLogin.bezelStyle = .rounded
+        preference("Claude Code login", control: claudeCodeLogin, into: sessionsPage, id: "claudeCodeLogin")
+        claudeCodeLoginRow = Array(sessionsPage.arrangedSubviews.suffix(2))
+        let sessionsHelp = helpLabel("Sends a tiny message on the cheapest model through the provider's own tool: Claude Code, the Codex CLI or Antigravity. Without a Claude Code login, Claude falls back to claude.ai. Mistral has no 5h window.")
+        sessionsHelp.maximumNumberOfLines = 0
+        sessionsPage.addArrangedSubview(sessionsHelp)
         providerPopup.addItems(withTitles: Provider.allCases.map(\.displayName)); providerPopup.target = self; providerPopup.action = #selector(providerChanged)
         for field in [labelField, appPathField, dataDirField] {
             field.delegate = self; field.widthAnchor.constraint(equalToConstant: 310).isActive = true
@@ -428,7 +436,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     private func buildMenuBarSection(into form: NSStackView) {
         heading("Menu bar", subtitle: "Grid and default layout", into: form)
-        gridPicker.toolTip = "Choose up to 3 rows and 3 columns."
+        gridPicker.toolTip = "Choose up to \(AppConfig.maxMenuBarRows) rows and \(AppConfig.maxMenuBarColumns) columns."
         gridPicker.onHover = { [weak self] size in self?.showGridLabel(size) }
         gridPicker.onPick = { [weak self] rows, columns in self?.gridPicked(rows: rows, columns: columns) }
         preference("Layout", control: gridPicker, into: form)
@@ -843,6 +851,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         resetAlerts.selectItem(at: [0, 1, 6, 24, 72].firstIndex(of: profile.manualResetExpiryAlertHours ?? 0) ?? 0)
         let accountControls = [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
+        updateClaudeCodeLogin(for: profile)
 
         labelField.stringValue = profile.label
         providerPopup.selectItem(withTitle: profile.provider.displayName)
@@ -858,14 +867,20 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             : "Turn on \"Show a label on each app icon\" below to use it"
 
         let signedIn = profile.signedIn == true
-        autoStartSession.isEnabled = signedIn
-        autoStartSession.state = (signedIn && profile.autoStartsSession) ? .on : .off
+        let supportsSessionKick = profile.provider != .mistral
+        autoStartSession.isEnabled = signedIn && supportsSessionKick
+        autoStartSession.state = (signedIn && supportsSessionKick && profile.autoStartsSession) ? .on : .off
+        autoStartSession.toolTip = supportsSessionKick
+            ? nil
+            : "Mistral uses a monthly budget with no 5-hour session clock to start."
 
         let sessionRunning = profile.usage != nil && !SessionKickstarter.isSessionIdle(profile)
-        startSessionNow.isEnabled = signedIn && !sessionRunning
-        startSessionNow.toolTip = sessionRunning
-            ? "The 5-hour session is already running, nothing to start."
-            : "Send a tiny \"hi\" now to start the 5-hour window."
+        startSessionNow.isEnabled = signedIn && supportsSessionKick && !sessionRunning
+        startSessionNow.toolTip = !supportsSessionKick
+            ? "Mistral uses a monthly budget — there is no 5-hour session window to start."
+            : (sessionRunning
+                ? "The 5-hour session is already running, nothing to start."
+                : "Send a tiny \"hi\" now to start the 5-hour window.")
 
         if profile.isPendingLogin == true {
             accountTitle.stringValue = "Connect \(profile.provider.rawValue)"
@@ -898,7 +913,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
+        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, claudeCodeLogin, removeButton, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
         iconLabelField.stringValue = ""
         iconLabelDefault.stringValue = ""
@@ -991,6 +1006,49 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         restoreSelection(id: id)
     }
 
+    /// Shows whether this Claude account has a Claude Code login to start its 5h window
+    /// with. `claude auth status` takes a moment per folder, so it's looked up off the
+    /// main thread and only applied if the same account is still selected.
+    private func updateClaudeCodeLogin(for profile: LaunchProfile) {
+        claudeCodeLoginRow.forEach { $0.isHidden = profile.provider != .claude }
+        guard profile.provider == .claude else { return }
+        claudeCodeLogin.title = "Checking…"
+        claudeCodeLogin.isEnabled = false
+        let id = profile.id
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let installed = ClaudeCodeCLI.executable() != nil
+            let login = installed ? ClaudeCodeCLI.login(for: profile) : nil
+            DispatchQueue.main.async {
+                guard let self, self.selectedID == id else { return }
+                if let login {
+                    self.claudeCodeLogin.title = "Linked · \(login.displayPath)"
+                    self.claudeCodeLogin.isEnabled = false
+                    self.claudeCodeLogin.toolTip = "5h sessions start through Claude Code, signed in as \(login.email)."
+                } else if !installed {
+                    self.claudeCodeLogin.title = "Install Claude Code first"
+                    self.claudeCodeLogin.isEnabled = false
+                    self.claudeCodeLogin.toolTip = "Install Claude Code from claude.com/claude-code. Until then 5h sessions start through claude.ai."
+                } else {
+                    self.claudeCodeLogin.title = "Sign in to Claude Code…"
+                    self.claudeCodeLogin.isEnabled = profile.accountEmail != nil
+                    self.claudeCodeLogin.toolTip = "No Claude Code login for \(profile.accountEmail ?? "this account") yet, so 5h sessions start through claude.ai. Sign in to switch to Claude Code."
+                }
+            }
+        }
+    }
+
+    @objc private func claudeCodeLoginTapped() {
+        let row = table.selectedRow
+        guard row >= 0, row < config.profiles.count else { return }
+        let profile = config.profiles[row]
+        do {
+            try ClaudeCodeCLI.openSignIn(for: profile)
+            statusLabel.stringValue = "Finish signing in as \(profile.accountEmail ?? "this account") in Terminal, then reselect the account."
+        } catch {
+            statusLabel.stringValue = error.localizedDescription
+        }
+    }
+
     @objc private func startSessionNowTapped() {
         let row = table.selectedRow
         guard row >= 0, row < config.profiles.count else { return }
@@ -1014,7 +1072,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         let alert = NSAlert()
         alert.messageText = "Remove \(profile.accountEmail ?? profile.label) from LLMCodeBar?"
-        alert.informativeText = "This just takes the account off this list. Your Claude/ChatGPT login and its data are not touched, and you can add it back with Rescan."
+        alert.informativeText = "This just takes the account off this list. Your Claude, ChatGPT, Gemini or Mistral login and its data are not touched, and you can add it back with Rescan."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
@@ -1042,12 +1100,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
               let provider = Provider.named(picker.titleOfSelectedItem ?? "") else { return }
 
         let profile = ConfigStore.shared.createPendingProfile(provider: provider)
+        if provider == .gemini {
+            GeminiAuthStore.prepareForNewAccountLogin(existingProfiles: config.profiles)
+        }
         commit { $0.profiles.append(profile) }
         table.reloadData()
         table.selectRowIndexes(IndexSet(integer: config.profiles.count - 1), byExtendingSelection: false)
         do {
             try Launcher.launch(profile)
-            statusLabel.stringValue = "Opened \(provider.rawValue). Sign in there, then hit \"Rescan for accounts\"."
+            statusLabel.stringValue = "Opened \(provider.displayName). Sign in there, then hit \"Rescan\"."
         } catch {
             statusLabel.stringValue = "Could not open login window: \(error.localizedDescription)"
         }

@@ -208,6 +208,22 @@ let claudeIdle = profile("95", email: "franciskid95@gmail.com", five: 0, fiveRes
 check("Claude auto-start: after its reset, 40 min on", SessionKickstarter.shouldKick(claudeIdle, lastKick: now.addingTimeInterval(-40 * 60), now: now), "reset passed, last start 40 min ago")
 check("Claude auto-start: not while its window runs", !SessionKickstarter.shouldKick(p95, lastKick: nil, now: now), "50% used, reset ahead")
 
+var geminiIdle = LaunchProfile.pending(provider: .gemini, appPath: "/Applications/Antigravity.app", dataDir: "/tmp/gemini-idle")
+geminiIdle.isPendingLogin = false
+geminiIdle.signedIn = true
+geminiIdle.usage = UsageInfo(source: "antigravity-ls", windows: [
+    UsageWindow(title: "5h", usedPercent: 0, remainingPercent: 100, resetsAt: nil),
+    UsageWindow(title: "Week", usedPercent: 5, remainingPercent: 95, resetsAt: now.addingTimeInterval(6 * 86400)),
+], updatedAt: now)
+var geminiRunning = geminiIdle
+geminiRunning.usage = UsageInfo(source: "antigravity-ls", windows: [
+    UsageWindow(title: "5h", usedPercent: 18, remainingPercent: 82, resetsAt: now.addingTimeInterval(3 * 3600)),
+], updatedAt: now)
+check("Gemini auto-start: idle window starts", SessionKickstarter.shouldKick(geminiIdle, lastKick: nil, now: now), "no active 5h reset")
+check("Gemini auto-start: not while 5h window runs", !SessionKickstarter.shouldKick(geminiRunning, lastKick: nil, now: now), "18% used, reset ahead")
+check("Gemini auto-start: rate-limited within 30 min", !SessionKickstarter.shouldKick(geminiIdle, lastKick: now.addingTimeInterval(-10 * 60), now: now), "last start 10 min ago")
+check("Gemini auto-start: allowed again after 40 min if still idle", SessionKickstarter.shouldKick(geminiIdle, lastKick: now.addingTimeInterval(-40 * 60), now: now), "last start 40 min ago")
+
 var sorting = KeepGoing.Store()
 let order = KeepGoing.assess([session("code:a", title: "A idle", on: "95", ago: 3000),
                               session("code:b", title: "B waiting", on: "97", limit: "L"),

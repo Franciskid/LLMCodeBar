@@ -87,6 +87,30 @@ notificationPicker.selectItem(at: 0)
 _ = notificationPicker.target?.perform(notificationPicker.action!, with: notificationPicker)
 check(editedConfig.profiles[0].manualResetExpiryAlertHours == 0 && ResetReminder.plans(editedConfig.profiles[0]).isEmpty, "Off disables selected account notifications")
 check(editedConfig.menuBarGridRows == 1 && editedConfig.menuBarGridColumns == 3 && editedConfig.showsMenuBarLabels, "notification edits preserve restored menu-bar preferences")
+// The Claude Code login row belongs to Claude accounts only, and the Sessions help text is shown whole.
+var sessionsCodex = secondProfile
+sessionsCodex.provider = .codex
+sessionsCodex.id = "codex-account"
+var sessionsConfig = AppConfig(launchAtLogin: false, profiles: [profile, sessionsCodex])
+let sessionsSettings = SettingsWindowController(config: sessionsConfig, onChange: { mutate in mutate(&sessionsConfig) }, onCheckForUpdates: { _ in })
+let sessionsTabs = descendants(sessionsSettings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
+sessionsTabs.selectTabViewItem(at: 2)
+let sessionsAccountView = sessionsTabs.tabViewItems[2].view!
+let sessionsPicker = descendants(sessionsAccountView).compactMap { $0 as? NSSegmentedControl }.first { (control: NSSegmentedControl) in control.segmentCount == 3 }!
+sessionsPicker.selectedSegment = 1
+_ = sessionsPicker.target?.perform(sessionsPicker.action!, with: sessionsPicker)
+let sessionsTable = descendants(sessionsSettings.window!.contentView!).compactMap { $0 as? NSTableView }.first!
+let loginButton = descendants(sessionsAccountView).first { $0.identifier?.rawValue == "claudeCodeLogin" }!
+for (row, claude) in [(1, false), (0, true), (1, false), (0, true)] {
+    sessionsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    sessionsSettings.window!.contentView!.layoutSubtreeIfNeeded()
+    let loginRow = loginButton.superview!
+    check(loginRow.isHidden == !claude, "Claude Code login row \(claude ? "shows for Claude" : "is hidden for ChatGPT")")
+    if claude { check(loginRow.frame.width > 300, "Claude Code login row keeps its width after being hidden") }
+}
+let sessionsHelpText = descendants(sessionsAccountView).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Sends a tiny message") }!
+check(sessionsHelpText.frame.height >= sessionsHelpText.intrinsicContentSize.height - 1, "Sessions help text isn't cut off")
+try snapshot(sessionsAccountView, "settings-sessions")
 settings.select(sectionNamed: "continue")
 check(pages.selectedTabViewItem?.label == "Continue after limits", "the menu's gear opens the continue page")
 let continueControls = descendants(pages.tabViewItems[3].view!)
@@ -245,6 +269,24 @@ let codexGrants: [String: Any] = ["credits": [
     ["reset_type": "codex_rate_limits", "status": "available", "expires_at": NSNull()]
 ]]
 check(ManualResets.codex(codexGrants, now: now)!.availableCount(at: now) == 2, "Codex banked-reset inventory is distinct from quota usage")
+let appServerLimits: [String: Any] = [
+    "rateLimits": [
+        "primary": ["usedPercent": 2, "windowDurationMins": 300, "resetsAt": 1795726170],
+        "secondary": ["usedPercent": 84, "windowDurationMins": 10080, "resetsAt": 1795803859],
+        "credits": ["hasCredits": false, "unlimited": false, "balance": "0"],
+        "planType": "plus",
+    ],
+    "rateLimitResetCredits": ["availableCount": 2, "credits": [
+        ["id": "a", "resetType": "codexRateLimits", "status": "available", "grantedAt": 1, "expiresAt": Int(now.timeIntervalSince1970) + 86400],
+        ["id": "b", "resetType": "codexRateLimits", "status": "available", "grantedAt": 1, "expiresAt": NSNull()],
+    ]],
+]
+let reshaped = UsageRefresher.codexUsageJSON(fromAppServer: appServerLimits)
+let reshapedLimit = reshaped.usage["rate_limit"] as? [String: Any]
+check((reshapedLimit?["primary_window"] as? [String: Any])?["limit_window_seconds"] as? Double == 18000
+      && (reshapedLimit?["secondary_window"] as? [String: Any])?["used_percent"] as? Double == 84
+      && reshaped.usage["plan_type"] as? String == "plus", "Codex CLI rate limits map onto the usage parser's fields")
+check(reshaped.resets.flatMap { ManualResets.codex($0, now: now) }?.availableCount(at: now) == 2, "Codex CLI reset credits are counted")
 let dateOnly = ManualResetInventory.dateText(ManualResets.date("2026-11-17T07:59:00Z")!, now: ManualResets.date("2026-11-13T12:00:00Z")!, locale: Locale(identifier: "fr_FR"))
 check(dateOnly.contains("17") && dateOnly.contains("nov") && !dateOnly.contains(":") && !dateOnly.contains("2026"), "manual reset dates omit hour and current year")
 let chipView = ManualResetView(inventory: grants)
@@ -266,6 +308,137 @@ let plans = ResetReminder.plans(profile, now: now)
 check(plans.count == 2 && plans.allSatisfy { abs($0.delay - 86400) < 2 }, "expiry alerts follow grant deadlines")
 profile.usage?.manualResets = nil
 check(ResetReminder.plans(profile, now: now).isEmpty, "5h and weekly timers never generate manual reset alerts")
+
+// Gemini / Antigravity: provider naming, quota parsing, cheapest model picking,
+// protobuf summary decoding, trajectory step extraction, and handoff framing.
+check(Provider.gemini.displayName == "Gemini", "Gemini display name")
+check(Provider.named("Gemini") == .gemini && Provider.named("Antigravity") == .gemini, "Gemini and Antigravity resolve to .gemini")
+
+let geminiNow = ISO8601DateFormatter().date(from: "2026-11-23T10:44:46Z")!
+let geminiUserStatus: [String: Any] = [
+    "userStatus": [
+        "name": "Sample User",
+        "email": "work97@example.com",
+        "planStatus": ["planInfo": ["teamsTier": "TEAMS_TIER_PRO", "planName": "Pro"]],
+        "cascadeModelConfigData": [
+            "clientModelConfigs": [
+                ["label": "Claude Opus 5.5 (High)", "modelOrAlias": ["model": "MODEL_PLACEHOLDER_M402"], "quotaInfo": ["remainingFraction": 1.0]],
+                ["label": "Gemini 4 Neon (High)", "modelOrAlias": ["model": "MODEL_PLACEHOLDER_M500"], "quotaInfo": ["remainingFraction": 0.82]],
+                ["label": "Gemini 3.8 Flash (High)", "modelOrAlias": ["model": "MODEL_PLACEHOLDER_M318"], "quotaInfo": ["remainingFraction": 0.82]],
+                ["label": "Gemini 3.8 Flash (Low)", "modelOrAlias": ["model": "MODEL_PLACEHOLDER_M320"], "quotaInfo": ["remainingFraction": 0.82, "resetTime": "2026-11-23T13:30:25Z"]],
+                ["label": "GPT-OSS 120B (Medium)", "modelOrAlias": ["model": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"], "quotaInfo": ["remainingFraction": 1.0]],
+            ],
+        ],
+    ],
+]
+let geminiQuotaSummary: [String: Any] = [
+    "response": [
+        "groups": [
+            [
+                "displayName": "Gemini Models",
+                "buckets": [
+                    ["bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.95, "description": "Used 5%", "resetTime": "2026-11-30T08:30:25Z"],
+                    ["bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.82, "description": "Used 18%", "resetTime": "2026-11-23T13:30:25Z"],
+                ],
+            ],
+            [
+                "displayName": "Claude and GPT models",
+                "buckets": [
+                    ["bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0, "resetTime": "2026-11-23T15:44:46Z"],
+                ],
+            ],
+        ],
+    ],
+]
+let geminiSnap = GeminiLanguageServer.parseUsageSnapshot(userStatusJSON: geminiUserStatus, quotaSummaryJSON: geminiQuotaSummary, now: geminiNow)
+check(geminiSnap.account.email == "work97@example.com" && geminiSnap.account.plan == "Pro", "Gemini account & plan parse")
+check(geminiSnap.windows.map(\.title) == ["5h", "Week"], "Gemini orders 5h then Week and omits unused 3P bucket: \(geminiSnap.windows.map(\.title))")
+check(abs(geminiSnap.windows[0].usedPercent - 18) < 0.01 && geminiSnap.windows[0].resetsAt != nil, "Gemini active 5h usage & reset time parse")
+let cheapestGemini = GeminiLanguageServer.cheapestGeminiModels(from: geminiSnap.models)
+check(cheapestGemini.first?.id == "MODEL_PLACEHOLDER_M320", "cheapest Gemini model prefers Flash (Low) over Pro/Opus/GPT: \(cheapestGemini.map(\.label))")
+
+// Idle 5h window: remainingFraction == 1, no description, placeholder resetTime == now + 5h -> resetsAt cleared!
+let idleSummary: [String: Any] = [
+    "response": [
+        "groups": [[
+            "displayName": "Gemini Models",
+            "buckets": [
+                ["bucketId": "gemini-5h", "window": "5h", "remainingFraction": 1.0, "resetTime": "2026-11-23T15:44:46Z"],
+            ],
+        ]],
+    ],
+]
+let idleSnap = GeminiLanguageServer.parseUsageSnapshot(userStatusJSON: geminiUserStatus, quotaSummaryJSON: idleSummary, now: geminiNow)
+check(idleSnap.windows.count == 1 && idleSnap.windows[0].resetsAt == nil && idleSnap.windows[0].usedPercent == 0, "idle Gemini 5h placeholder reset time is cleared")
+
+// Trajectory step extraction
+let sampleTrajectory: [String: Any] = [
+    "steps": [
+        ["type": "CORTEX_STEP_TYPE_USER_INPUT", "userInput": ["items": [["text": "Fix the build"]]], "metadata": ["createdAt": "2026-11-23T10:00:00Z"]],
+        ["type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE", "plannerResponse": ["response": "Checking build script now."]],
+        ["type": "CORTEX_STEP_TYPE_RUN_COMMAND", "runCommand": ["commandLine": "./scripts/build.sh", "combinedOutput": ["full": "Built ok"], "exitCode": 0]],
+        ["type": "CORTEX_STEP_TYPE_NOTIFY_USER", "notifyUser": ["notificationContent": "Build passes."]],
+    ],
+]
+let parsedGeminiSteps = GeminiConversationHistory.parseSteps(from: sampleTrajectory)
+check(parsedGeminiSteps.count == 4, "Gemini trajectory parses user, planner, command, and notify steps")
+let (geminiPrompt, geminiTruncated) = GeminiSessionTransfer.handoffPrompt(title: "Build fix", sourceLabel: "Claude Code", steps: parsedGeminiSteps)
+check(!geminiTruncated && geminiPrompt.contains("Fix the build") && geminiPrompt.contains("./scripts/build.sh") && geminiPrompt.contains("Build passes."), "Gemini handoff prompt carries conversation context")
+
+// Validate real local Antigravity summaries if present on this machine.
+let localGeminiConversations = GeminiSessionTransfer.conversations()
+print("Passed: Gemini quota parsing, cheapest model selection, idle 5h detection, trajectory extraction. Local Antigravity conversations readable: \(localGeminiConversations.count).")
+
+// Mistral / Vibe: provider naming, monthly budget parsing, reset formatting, no 5h session kick,
+// and Vibe unified session journal extraction.
+check(Provider.mistral.displayName == "Mistral", "Mistral display name")
+check(Provider.named("Mistral") == .mistral && Provider.named("Vibe") == .mistral && Provider.named("Le Chat") == .mistral, "Mistral, Vibe and Le Chat resolve to .mistral")
+
+let mistralSessionJSON: [String: Any] = [
+    "user": ["id": "user-123", "email": "work97@example.com", "firstName": "Sam", "lastName": "Lee"],
+    "organization": ["id": "org-1", "name": "Personal", "orgTier": "B"],
+]
+let mistralBudgetJSON: [String: Any] = [
+    "usage_percentage": 24.5,
+    "initial_budget": 20.0,
+    "currency": "USD",
+    "payg_enabled": false,
+    "reset_at": "2026-12-01T00:00:00Z",
+]
+let mistralSnap = MistralAuthStore.parseUsageSnapshot(
+    sessionJSON: mistralSessionJSON,
+    budgetJSON: mistralBudgetJSON,
+    idTokenClaims: nil,
+    whoamiPlan: "INDIVIDUAL",
+    whoamiHasPaidVibe: true)
+check(mistralSnap.account.email == "work97@example.com" && mistralSnap.account.plan == "Pro", "Mistral account & plan parse")
+check(mistralSnap.windows.count == 1 && mistralSnap.windows[0].title == "Month" && mistralSnap.windows[0].isPrimary, "Mistral emits primary Month window")
+check(abs(mistralSnap.windows[0].usedPercent - 24.5) < 0.01 && mistralSnap.windows[0].detail == "$4.90 / $20", "Mistral budget percentage and dollar detail parse: \(mistralSnap.windows[0].detail ?? "nil")")
+check(QuotaWindowView.shortTitle("Month") == "1m" && ProfileFormatting.windowTitle("Month") == "Monthly", "Month window titles format cleanly")
+check(UsageNotifier.watchedWindows.contains("Month"), "UsageNotifier watches Month window")
+
+var mistralProfile = LaunchProfile.pending(provider: .mistral, appPath: MistralAuthStore.defaultAppPath, dataDir: MistralAuthStore.defaultDataDir)
+mistralProfile.isPendingLogin = false
+mistralProfile.signedIn = true
+mistralProfile.usage = UsageInfo(source: "mistral-trpc", status: nil, windows: mistralSnap.windows, creditsRemaining: nil, accountEmail: mistralSnap.account.email, accountPlan: mistralSnap.account.plan, updatedAt: now)
+check(!SessionKickstarter.isSessionIdle(mistralProfile), "Mistral monthly budget never triggers 5h session auto-start")
+check(mistralProfile.visibleWindows().map(\.title) == ["Month"], "Mistral Month window stays visible")
+
+let sampleVibeJournal: [String] = [
+    #"{"type":"projection_delta","payload":{"delta":[{"entry":{"type":"message","id":"m1","role":"user","createdAt":1795432815838,"content":[{"type":"text","text":"<t3_code_instructions>ignored</t3_code_instructions>\nCheck the API limits"}]}}]}}"#,
+    #"{"type":"projection_delta","payload":{"delta":[{"entry":{"type":"message","id":"m2","role":"assistant","createdAt":1795432820160,"content":[{"type":"text","text":"Checking billing.budget now."}]}}]}}"#,
+    #"{"type":"projection_delta","payload":{"delta":[{"entry":{"type":"message","id":"m2","role":"assistant","createdAt":1795432825000,"content":[{"type":"text","text":"Checking billing.budget now. Done."}]}}]}}"#,
+]
+let parsedVibeSteps = MistralSessionTransfer.parseJournalLines(sampleVibeJournal)
+check(parsedVibeSteps.count == 2, "Vibe journal parser deduplicates updated message IDs and keeps 2 turns: got \(parsedVibeSteps.count)")
+if case let .user(uText, _) = parsedVibeSteps[0], case let .agent(aText, _) = parsedVibeSteps[1] {
+    check(uText == "Check the API limits" && aText == "Checking billing.budget now. Done.", "Vibe journal strips wrapper tags and keeps final assistant text")
+} else {
+    check(false, "Vibe journal turn roles mismatch")
+}
+let localVibeSessions = MistralSessionTransfer.sessions(limit: 20)
+print("Passed: Mistral monthly budget parsing, no-5h-kick guard, and Vibe journal extraction. Local Vibe sessions readable: \(localVibeSessions.count).")
+
 if CommandLine.arguments.contains("--test-codex-import") {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("LLMCodeBar-integration-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -284,4 +457,65 @@ if CommandLine.arguments.contains("--test-codex-import") {
     let id = try CodexSessionTransfer.importClaudeSession(session, into: destination)
     check(!id.isEmpty, "Codex importer returns a thread")
     print("Passed: T3-format transcript imported through installed Codex into an isolated test home.")
+}
+if CommandLine.arguments.contains("--test-gemini-live") {
+    let defaultDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Antigravity").path
+    var geminiProfile = LaunchProfile.pending(provider: .gemini, appPath: GeminiLanguageServer.defaultAppPath, dataDir: defaultDir)
+    geminiProfile.isPendingLogin = false
+    let snapshot = try GeminiLanguageServer.fetchUsage(for: geminiProfile)
+    check(snapshot.account.email != nil, "live Gemini account email fetched via Antigravity")
+    check(!snapshot.windows.isEmpty, "live Gemini quota windows fetched via Antigravity")
+    print("Passed live Gemini fetch: \(snapshot.account.email ?? "-") (\(snapshot.account.plan ?? "-")) windows=\(snapshot.windows.map { "\($0.title):\(Int($0.usedPercent.rounded()))%" })")
+    if let first = localGeminiConversations.first {
+        let history = try GeminiSessionTransfer.readHistory(of: first, from: geminiProfile)
+        check(!history.steps.isEmpty, "live Gemini conversation trajectory readable via Antigravity")
+        print("Passed live Gemini conversation read: “\(first.displayTitle)” (\(history.steps.count) steps)")
+    }
+}
+if CommandLine.arguments.contains("--test-mistral-live") {
+    var profile = LaunchProfile.pending(provider: .mistral, appPath: MistralAuthStore.defaultAppPath, dataDir: MistralAuthStore.defaultDataDir)
+    profile.isPendingLogin = false
+    let snapshot = try MistralAuthStore.fetchUsage(for: profile, allowKeychain: true)
+    check(snapshot.account.email != nil, "live Mistral account email fetched")
+    check(!snapshot.windows.isEmpty, "live Mistral monthly budget fetched")
+    print("Passed live Mistral fetch: \(snapshot.account.email ?? "-") (\(snapshot.account.plan ?? "-")) windows=\(snapshot.windows.map { "\($0.title):\(Int($0.usedPercent.rounded()))% (\($0.detail ?? "-"))" })")
+    if let first = localVibeSessions.first {
+        let history = try MistralSessionTransfer.readHistory(of: first)
+        check(!history.steps.isEmpty, "live Vibe session journal readable")
+        print("Passed live Vibe session read: “\(first.displayTitle)” (\(history.steps.count) steps)")
+    }
+}
+if CommandLine.arguments.contains("--test-cli-usage-live") {
+    // Read-only: usage through each provider's own CLI. Nothing is sent to a model.
+    let config = ConfigStore.shared.load()
+    if let codex = config.profiles.first(where: { $0.provider == .codex }) {
+        let response = try CodexSessionTransfer.rateLimits(for: codex)
+        let usage = UsageRefresher.codexUsageJSON(fromAppServer: response).usage
+        check(usage["rate_limit"] != nil, "live ChatGPT usage read through codex app-server")
+        print("Passed live Codex CLI usage: \((usage["rate_limit"] as? [String: Any]).map { "\($0)" } ?? "-")")
+    }
+    if let mistral = config.profiles.first(where: { $0.provider == .mistral }) {
+        let snapshot = MistralAuthStore.fetchUsageThroughCLI(for: mistral)
+        check(snapshot != nil && !(snapshot?.windows.isEmpty ?? true), "live Mistral budget read through the Vibe CLI")
+        print("Passed live Vibe CLI usage: \(snapshot?.account.plan ?? "-") windows=\(snapshot?.windows.map { "\($0.title):\(Int($0.usedPercent.rounded()))%" } ?? [])")
+    }
+    for claude in config.profiles where claude.provider == .claude {
+        let login = ClaudeCodeCLI.login(for: claude)
+        print("Claude Code login for \(claude.accountEmail ?? claude.label): \(login?.displayPath ?? "none (falls back to claude.ai)")")
+    }
+}
+if let index = CommandLine.arguments.firstIndex(of: "--test-claude-code-start"), index + 1 < CommandLine.arguments.count {
+    // Sends one "hi" on Haiku with the given Claude Code config folder.
+    let dir = CommandLine.arguments[index + 1]
+    guard let login = ClaudeCodeCLI.status(configDir: dir) else { fatalError("No Claude subscription login in \(dir)") }
+    let model = try ClaudeCodeCLI.sendThrowawayHi(login: login)
+    print("Passed Claude Code 5h start: \(login.displayPath) on \(model)")
+}
+if CommandLine.arguments.contains("--test-codex-start") {
+    // Sends one "hi" in an ephemeral Codex thread on the first ChatGPT account.
+    let config = ConfigStore.shared.load()
+    guard let codex = config.profiles.first(where: { $0.provider == .codex }) else { fatalError("No ChatGPT account") }
+    let models = Array(SessionKickstarter.cheapestCodexModels(for: codex).prefix(3))
+    let model = try CodexSessionTransfer.sendThrowawayHi(for: codex, models: models)
+    print("Passed Codex CLI 5h start on \(model) (candidates: \(models))")
 }

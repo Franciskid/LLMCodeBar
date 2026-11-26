@@ -57,7 +57,10 @@ enum ProfileFormatting {
         switch title {
         case "5h": return "Session"
         case "Week": return "Weekly"
+        case "Month": return "Monthly"
         case "Sonnet week": return "Sonnet"
+        case "3P 5h": return "3P 5h"
+        case "3P week": return "3P 7d"
         default: return title
         }
     }
@@ -70,23 +73,29 @@ enum ProfileFormatting {
         window.usedPercent >= 99.5
     }
 
-    /// "in 52 min", "in 3h 10m", or a day and time once it's a day or more away.
+    /// "in 52 min", "in 3h 10m", a weekday/time within the week, or a calendar date for monthly resets.
     static func backIn(_ date: Date) -> String {
-        let minutes = max(1, Int(ceil(date.timeIntervalSinceNow / 60)))
+        let seconds = date.timeIntervalSinceNow
+        let minutes = max(1, Int(ceil(seconds / 60)))
         if minutes < 60 { return "in \(minutes) min" }
         if minutes < 24 * 60 {
             let hours = minutes / 60, rest = minutes % 60
             return rest == 0 ? "in \(hours)h" : "in \(hours)h \(rest)m"
+        }
+        if seconds >= 6 * 86_400 {
+            return resetMonthFormatter.string(from: date)
         }
         return resetDayFormatter.string(from: date)
     }
 
     static func resetText(for window: UsageWindow) -> String {
         guard let resetsAt = window.resetsAt else { return "-" }
-        // A weekly window resets days from now, so a bare "20:00" is meaningless.
-        // Show the weekday whenever the reset isn't today.
+        // A weekly window resets days from now, and a monthly window weeks from now.
         if Calendar.current.isDate(resetsAt, inSameDayAs: Date()) {
             return resetClockFormatter.string(from: resetsAt)
+        }
+        if resetsAt.timeIntervalSinceNow >= 6 * 86_400 {
+            return resetMonthFormatter.string(from: resetsAt)
         }
         return resetDayFormatter.string(from: resetsAt)
     }
@@ -119,6 +128,8 @@ enum ProfileFormatting {
         switch provider {
         case .claude: return "sparkles"
         case .codex: return "terminal"
+        case .gemini: return "sparkle"
+        case .mistral: return "wind"
         }
     }
 
@@ -150,6 +161,14 @@ enum ProfileFormatting {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE HH:mm"
         // The app is in English, so its day names are too ("Sat", not "sam.").
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        return formatter
+    }()
+
+    private static let resetMonthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         return formatter

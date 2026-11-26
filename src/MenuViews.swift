@@ -92,6 +92,7 @@ enum MenuBarBadge {
         var weekPercent: Double? = nil
         var fiveHourResetsAt: Date? = nil
         var weekResetsAt: Date? = nil
+        var isMonthlyOnly: Bool = false
     }
 
     struct Layout {
@@ -130,10 +131,12 @@ enum MenuBarBadge {
             guard let profile = config.profiles.first(where: { $0.id == id }),
                   let percent = ProfileFormatting.primaryUsagePercent(for: profile) else { return nil }
             let icon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
+            let primaryWindow = profile.usage?.fiveHourWindow
             return Row(icon: icon, percent: percent, label: profile.menuBarLabelText,
                        weekPercent: profile.usage?.weeklyWindow?.usedPercent,
-                       fiveHourResetsAt: profile.usage?.fiveHourWindow?.resetsAt,
-                       weekResetsAt: profile.usage?.weeklyWindow?.resetsAt)
+                       fiveHourResetsAt: primaryWindow?.resetsAt,
+                       weekResetsAt: profile.usage?.weeklyWindow?.resetsAt,
+                       isMonthlyOnly: primaryWindow?.title == "Month" && profile.usage?.weeklyWindow == nil)
         }
         guard !cells.isEmpty else { return nil }
         return image(rows: cells, layout: Layout(
@@ -188,7 +191,8 @@ enum MenuBarBadge {
         // The weekly % and reset countdowns only fit when everything is on one row.
         func details(_ row: Row) -> (five: String?, week: String?, weekly: Double?) {
             guard usedRows == 1 else { return (nil, nil, nil) }
-            return (layout.resets.showsFiveHour ? countdown(to: row.fiveHourResetsAt, now: now) : nil,
+            let showPrimaryReset = row.isMonthlyOnly ? (layout.resets != .none) : layout.resets.showsFiveHour
+            return (showPrimaryReset ? countdown(to: row.fiveHourResetsAt, now: now) : nil,
                     layout.resets.showsWeekly ? countdown(to: row.weekResetsAt, now: now) : nil,
                     layout.showsWeekly ? row.weekPercent : nil)
         }
@@ -557,7 +561,8 @@ final class QuotaWindowView: NSView {
 
         if showLabels {
             let title = Self.label(Self.shortTitle(window.title), font: Self.labelFont, color: .secondaryLabelColor)
-            title.toolTip = "\(ProfileFormatting.windowTitle(window.title)) limit"
+            let baseTip = "\(ProfileFormatting.windowTitle(window.title)) limit"
+            title.toolTip = window.detail.map { "\(baseTip) · \($0)" } ?? baseTip
             addSubview(title)
             constraints += [
                 title.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -634,6 +639,7 @@ final class QuotaWindowView: NSView {
         switch title {
         case "5h": return "5h"
         case "Week": return "7d"
+        case "Month": return "1m"
         default: return ProfileFormatting.windowTitle(title)
         }
     }
@@ -782,7 +788,14 @@ final class ProfileMenuItemView: NSView {
         name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         name.toolTip = fullTitle
 
-        let plan = NSTextField(labelWithString: profile.usage?.accountPlan ?? profile.accountPlan ?? "")
+        let planParts = [
+            profile.usage?.accountPlan ?? profile.accountPlan,
+            windows.first?.detail,
+        ].compactMap { part -> String? in
+            guard let part = part?.trimmingCharacters(in: .whitespacesAndNewlines), !part.isEmpty else { return nil }
+            return part
+        }
+        let plan = NSTextField(labelWithString: planParts.joined(separator: " · "))
         plan.translatesAutoresizingMaskIntoConstraints = false
         plan.font = .systemFont(ofSize: 12)
         plan.textColor = .secondaryLabelColor

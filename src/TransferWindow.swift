@@ -15,28 +15,34 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         case code(CodeSessionTransfer.Session)
         case chat(ChatTransfer.ChatSummary)
         case codex(CodexSessionTransfer.Thread)
+        case gemini(GeminiSessionTransfer.Conversation)
+        case mistral(MistralSessionTransfer.Session)
         case t3(T3SessionTransfer.Thread)
 
         var title: String {
             switch self {
-            case let .code(session): return session.displayTitle
+    case let .code(session): return session.displayTitle
             case let .chat(chat): return chat.displayName
             case let .codex(thread): return thread.displayTitle
-            case let .t3(thread): return thread.title
+            case let .gemini(conversation): return conversation.displayTitle
+            case let .mistral(session): return session.displayTitle
+    case let .t3(thread): return thread.title
             }
         }
 
         var date: Date? {
             switch self {
-            case let .code(session): return session.lastActivityAt
+    case let .code(session): return session.lastActivityAt
             case let .chat(chat): return chat.updatedAt
             case let .codex(thread): return thread.updatedAt
-            case let .t3(thread): return thread.updatedAt
+            case let .gemini(conversation): return conversation.updatedAt
+            case let .mistral(session): return session.updatedAt
+    case let .t3(thread): return thread.updatedAt
             }
         }
 
-        /// Code sessions and Codex threads are the same kind of thing for filtering: work
-        /// in a folder, as opposed to a chat.
+        /// Code sessions, Codex threads, Gemini conversations and Vibe sessions are coding work,
+        /// as opposed to a plain Claude chat.
         var isCode: Bool {
             if case .chat = self { return false }
             return true
@@ -44,9 +50,11 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
 
         private var projectName: String {
             switch self {
-            case let .code(session): return session.projectName
+    case let .code(session): return session.projectName
             case let .codex(thread): return thread.projectName
-            case let .t3(thread): return URL(fileURLWithPath: thread.cwd).lastPathComponent
+            case let .gemini(conversation): return conversation.projectName
+            case let .mistral(session): return session.projectName
+    case let .t3(thread): return URL(fileURLWithPath: thread.cwd).lastPathComponent
             case .chat: return ""
             }
         }
@@ -58,6 +66,8 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             case .code: parts = ["Code session"]
             case .chat: parts = ["Chat"]
             case .codex: parts = ["Codex thread"]
+            case .gemini: parts = ["Gemini conversation"]
+            case .mistral: parts = ["Vibe session"]
             case .t3: parts = ["T3 thread"]
             }
             if !projectName.isEmpty {
@@ -134,10 +144,10 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         return others.indices.contains(index) ? others[index] : nil
     }
 
-    /// Where a source's sessions can go. A Codex thread only has somewhere to go in
-    /// Claude: two ChatGPT windows share one Codex history, so there's nothing to move.
+    /// Where a source's sessions can go. Two ChatGPT windows share one Codex history, so
+    /// Codex→Codex is skipped; every other combination (including Gemini↔Gemini) is supported.
     private func destinations(for source: LaunchProfile) -> [LaunchProfile] {
-        profiles.filter { $0.id != source.id && ($0.provider == .claude || source.provider == .claude) }
+        profiles.filter { $0.id != source.id && !($0.provider == .codex && source.provider == .codex) }
     }
 
     /// Accounts read better with their remaining session usage attached - it's the number
@@ -238,6 +248,24 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             return
         }
 
+        // A Gemini / Antigravity account lists its local Antigravity conversations.
+        if source.provider == .gemini {
+            spinner.stopAnimation(nil)
+            items = GeminiSessionTransfer.conversations().map(Item.gemini)
+            applyFilter()
+            showSummary()
+            return
+        }
+
+        // A Mistral account lists its local Vibe unified sessions.
+        if source.provider == .mistral {
+            spinner.stopAnimation(nil)
+            items = MistralSessionTransfer.sessions().map(Item.mistral)
+            applyFilter()
+            showSummary()
+            return
+        }
+
         // Code sessions come off the disk, so they're on screen immediately.
         items = CodeSessionTransfer.sessions(for: source, orgID: source.organizationUUID, limit: 200).map(Item.code)
         applyFilter()
@@ -323,9 +351,34 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             switch item {
             case .code where destination.provider == .codex:
                 transferButton.title = "Copy to Codex  ·  \(account)"
+            case .code where destination.provider == .gemini,
+                 .chat where destination.provider == .gemini,
+                 .codex where destination.provider == .gemini,
+                 .mistral where destination.provider == .gemini:
+                transferButton.title = "Copy to Gemini  ·  \(account)"
+            case .code where destination.provider == .mistral,
+                 .chat where destination.provider == .mistral,
+                 .codex where destination.provider == .mistral,
+                 .gemini where destination.provider == .mistral,
+                 .mistral where destination.provider == .mistral:
+                transferButton.title = "Copy for Mistral  ·  \(account)"
             case .t3:
-                transferButton.title = "Copy to \(destination.provider == .claude ? "Claude Code" : "Codex")  ·  \(account)"
+                let app: String
+                switch destination.provider {
+                case .claude: app = "Claude Code"
+                case .codex: app = "Codex"
+                case .gemini: app = "Gemini"
+                case .mistral: app = "Mistral"
+                }
+                transferButton.title = "Copy to \(app)  ·  \(account)"
             case .codex:
+                transferButton.title = "Copy to Claude Code  ·  \(account)"
+            case .gemini where destination.provider == .gemini:
+                transferButton.title = "Copy to \(account)"
+            case .gemini where destination.provider == .codex,
+                 .mistral where destination.provider == .codex:
+                transferButton.title = "Copy to Codex  ·  \(account)"
+            case .gemini, .mistral:
                 transferButton.title = "Copy to Claude Code  ·  \(account)"
             case .code:
                 transferButton.title = "Move to \(account)"
@@ -351,6 +404,39 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         spinner.startAnimation(nil)
 
         switch item {
+        case let .t3(thread) where destination.provider == .gemini:
+            setStatus("Copying “\(thread.title)” into Gemini via Antigravity…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    let steps = try T3SessionTransfer.steps(thread)
+                    return try GeminiSessionTransfer.seedConversation(
+                        title: thread.title,
+                        cwd: thread.cwd,
+                        sourceLabel: "T3 Code",
+                        steps: steps,
+                        into: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
+                }
+            }
+
+        case let .t3(thread) where destination.provider == .mistral:
+            setStatus("Preparing “\(thread.title)” for Mistral Vibe…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    let steps = try T3SessionTransfer.steps(thread)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: thread.title,
+                        sourceLabel: "T3 Code",
+                        steps: steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
         case let .t3(thread):
             setStatus("Copying T3 conversation…")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -363,6 +449,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                     }
                 }
             }
+
         case let .code(session) where destination.provider == .codex:
             setStatus("Importing “\(session.displayTitle)” into Codex...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -371,6 +458,43 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                 }
                 DispatchQueue.main.async {
                     self?.finishCodexImport(outcome, named: session.displayTitle, destination: destination)
+                }
+            }
+
+        case let .code(session) where destination.provider == .gemini:
+            setStatus("Copying “\(session.displayTitle)” into Gemini via Antigravity…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> GeminiSessionTransfer.SeedResult in
+                    guard let transcript = session.transcriptURL else {
+                        throw CodexSessionTransfer.error("That session's transcript is no longer on disk, so there's nothing to hand over.")
+                    }
+                    let steps = try T3SessionTransfer.claudeCodeSteps(transcript: transcript)
+                    return try GeminiSessionTransfer.seedConversation(
+                        title: session.displayTitle,
+                        cwd: session.cwd,
+                        sourceLabel: "Claude Code",
+                        steps: steps,
+                        into: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
+                }
+            }
+
+        case let .codex(thread) where destination.provider == .gemini:
+            setStatus("Copying “\(thread.displayTitle)” into Gemini via Antigravity…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> GeminiSessionTransfer.SeedResult in
+                    let history = try CodexSessionTransfer.readHistory(of: thread, from: source!)
+                    return try GeminiSessionTransfer.seedConversation(
+                        title: thread.displayTitle,
+                        cwd: history.cwd ?? thread.cwd,
+                        sourceLabel: "Codex",
+                        steps: history.steps,
+                        into: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
                 }
             }
 
@@ -386,6 +510,158 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                 }
             }
 
+        case let .gemini(conversation) where destination.provider == .gemini:
+            setStatus("Copying “\(conversation.displayTitle)” to \(ChatTransfer.accountLabel(destination)) via Antigravity…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try GeminiSessionTransfer.transfer(conversation, from: source!, to: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
+                }
+            }
+
+        case let .gemini(conversation) where destination.provider == .codex:
+            setStatus("Importing “\(conversation.displayTitle)” into Codex...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try GeminiSessionTransfer.moveToCodex(conversation, from: source!, to: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishCodexImport(outcome, named: conversation.displayTitle, destination: destination)
+                }
+            }
+
+        case let .gemini(conversation):
+            setStatus("Copying “\(conversation.displayTitle)” into Claude Code...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try GeminiSessionTransfer.moveToClaudeCode(conversation, from: source!, to: destination)
+                }
+                DispatchQueue.main.async {
+                    let note = (try? outcome.get())?.trimmed == true ? " Older tool output was left out to keep it a workable size." : ""
+                    self?.finishCodeTransfer(outcome.map(\.metadataURL), named: conversation.displayTitle, destination: destination, verb: "Copied", note: note)
+                }
+            }
+
+        case let .code(session) where destination.provider == .mistral:
+            setStatus("Preparing “\(session.displayTitle)” for Mistral Vibe…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> MistralSessionTransfer.SeedResult in
+                    guard let transcript = session.transcriptURL else {
+                        throw CodexSessionTransfer.error("That session's transcript is no longer on disk, so there's nothing to hand over.")
+                    }
+                    let steps = try T3SessionTransfer.claudeCodeSteps(transcript: transcript)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: session.displayTitle,
+                        sourceLabel: "Claude Code",
+                        steps: steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
+        case let .codex(thread) where destination.provider == .mistral:
+            setStatus("Preparing “\(thread.displayTitle)” for Mistral Vibe…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> MistralSessionTransfer.SeedResult in
+                    let history = try CodexSessionTransfer.readHistory(of: thread, from: source!)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: thread.displayTitle,
+                        sourceLabel: "Codex",
+                        steps: history.steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
+        case let .gemini(conversation) where destination.provider == .mistral:
+            setStatus("Preparing “\(conversation.displayTitle)” for Mistral Vibe…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> MistralSessionTransfer.SeedResult in
+                    let history = try GeminiSessionTransfer.readHistory(of: conversation, from: source!)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: conversation.displayTitle,
+                        sourceLabel: "Gemini (Antigravity)",
+                        steps: history.steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
+        case let .chat(chat) where destination.provider == .mistral:
+            setStatus("Preparing “\(chat.displayName)” for Mistral Vibe…")
+            let allowKeychain = self.allowKeychain
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> MistralSessionTransfer.SeedResult in
+                    let (name, steps) = try ChatTransfer.handoffSteps(chat: chat, from: source!, allowKeychain: allowKeychain)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: name,
+                        sourceLabel: "a Claude chat",
+                        steps: steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
+        case let .mistral(session) where destination.provider == .mistral:
+            setStatus("Preparing “\(session.displayTitle)” for \(ChatTransfer.accountLabel(destination))…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> MistralSessionTransfer.SeedResult in
+                    let history = try MistralSessionTransfer.readHistory(of: session)
+                    return try MistralSessionTransfer.prepareHandoffToVibe(
+                        title: session.displayTitle,
+                        sourceLabel: "Mistral Vibe",
+                        steps: history.steps,
+                        destination: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishMistralHandoff(outcome, destination: destination)
+                }
+            }
+
+        case let .mistral(session) where destination.provider == .gemini:
+            setStatus("Copying “\(session.displayTitle)” into Gemini via Antigravity…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try MistralSessionTransfer.moveToGemini(session, to: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
+                }
+            }
+
+        case let .mistral(session) where destination.provider == .codex:
+            setStatus("Importing “\(session.displayTitle)” into Codex...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try MistralSessionTransfer.moveToCodex(session, to: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishCodexImport(outcome, named: session.displayTitle, destination: destination)
+                }
+            }
+
+        case let .mistral(session):
+            setStatus("Copying “\(session.displayTitle)” into Claude Code...")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result {
+                    try MistralSessionTransfer.moveToClaudeCode(session, to: destination)
+                }
+                DispatchQueue.main.async {
+                    let note = (try? outcome.get())?.trimmed == true ? " Older tool output was left out to keep it a workable size." : ""
+                    self?.finishCodeTransfer(outcome.map(\.metadataURL), named: session.displayTitle, destination: destination, verb: "Copied", note: note)
+                }
+            }
+
         case let .code(session):
             setStatus("Moving “\(session.displayTitle)”...")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -394,6 +670,24 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                 }
                 DispatchQueue.main.async {
                     self?.finishCodeTransfer(outcome, named: session.displayTitle, destination: destination)
+                }
+            }
+
+        case let .chat(chat) where destination.provider == .gemini:
+            setStatus("Copying “\(chat.displayName)” into Gemini via Antigravity…")
+            let allowKeychain = self.allowKeychain
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let outcome = Result { () -> GeminiSessionTransfer.SeedResult in
+                    let (name, steps) = try ChatTransfer.handoffSteps(chat: chat, from: source!, allowKeychain: allowKeychain)
+                    return try GeminiSessionTransfer.seedConversation(
+                        title: name,
+                        cwd: "",
+                        sourceLabel: "a Claude chat",
+                        steps: steps,
+                        into: destination)
+                }
+                DispatchQueue.main.async {
+                    self?.finishGeminiSeed(outcome, destination: destination)
                 }
             }
 
@@ -419,10 +713,14 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
     private func startT3Thread(from item: Item) {
         guard let source else { return }
         switch item {
-        case let .code(session): startT3Thread(from: item, source: source, folder: session.cwd)
+case let .code(session): startT3Thread(from: item, source: source, folder: session.cwd)
         case let .codex(thread): startT3Thread(from: item, source: source, folder: thread.cwd)
+        case let .gemini(conversation) where !conversation.cwd.isEmpty:
+            startT3Thread(from: item, source: source, folder: conversation.cwd)
+        case let .mistral(session) where !session.cwd.isEmpty:
+            startT3Thread(from: item, source: source, folder: session.cwd)
         case .t3: return
-        case .chat:
+        case .chat, .gemini, .mistral:
             guard let window else { return }
             let panel = NSOpenPanel()
             panel.canChooseDirectories = true
@@ -449,7 +747,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             let outcome = Result { () -> (T3SessionTransfer.Started, String) in
                 let handoff: T3SessionTransfer.Handoff
                 switch item {
-                case let .code(session):
+        case let .code(session):
                     guard let transcript = session.transcriptURL else {
                         throw CodexSessionTransfer.error("That session's transcript is no longer on disk, so there's nothing to hand over.")
                     }
@@ -458,6 +756,12 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
                 case let .codex(thread):
                     let history = try CodexSessionTransfer.readHistory(of: thread, from: source)
                     handoff = .init(title: thread.displayTitle, cwd: history.cwd ?? folder, source: "Codex", steps: history.steps)
+                case let .gemini(conversation):
+                    let history = try GeminiSessionTransfer.readHistory(of: conversation, from: source)
+                    handoff = .init(title: conversation.displayTitle, cwd: history.cwd ?? folder, source: "Gemini (Antigravity)", steps: history.steps)
+                case let .mistral(session):
+                    let history = try MistralSessionTransfer.readHistory(of: session)
+                    handoff = .init(title: session.displayTitle, cwd: history.cwd ?? folder, source: "Mistral Vibe", steps: history.steps)
                 case let .chat(chat):
                     let (name, steps) = try ChatTransfer.handoffSteps(chat: chat, from: source, allowKeychain: allowKeychain)
                     handoff = .init(title: name, cwd: folder, source: "a Claude chat", steps: steps)
@@ -494,6 +798,42 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             CodexSessionTransfer.openThread(threadID, in: destination)
         case let .failure(error):
             setStatus("Couldn't copy it: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func finishGeminiSeed(_ outcome: Result<GeminiSessionTransfer.SeedResult, Error>, destination: LaunchProfile) {
+        spinner.stopAnimation(nil)
+        isTransferring = false
+        updateTransferButton()
+
+        switch outcome {
+        case let .success(result):
+            var message = "Copied “\(result.title)” into Gemini for \(ChatTransfer.accountLabel(destination)) - opening Antigravity."
+            if result.truncated {
+                message += " Older messages were trimmed to fit."
+            }
+            setStatus(message)
+            try? Launcher.launch(destination)
+        case let .failure(error):
+            setStatus("Couldn't copy it: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func finishMistralHandoff(_ outcome: Result<MistralSessionTransfer.SeedResult, Error>, destination: LaunchProfile) {
+        spinner.stopAnimation(nil)
+        isTransferring = false
+        updateTransferButton()
+
+        switch outcome {
+        case let .success(result):
+            var message = "Copied handoff for “\(result.title)” to the clipboard - paste it into a new Mistral Vibe session."
+            if result.truncated {
+                message += " Older messages were trimmed to fit."
+            }
+            setStatus(message)
+            try? Launcher.launch(destination)
+        case let .failure(error):
+            setStatus("Couldn't prepare it: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -579,6 +919,14 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
             setStatus("\(items.count) Codex thread\(items.count == 1 ? "" : "s")")
             return
         }
+        if source?.provider == .gemini {
+            setStatus("\(items.count) Gemini conversation\(items.count == 1 ? "" : "s")")
+            return
+        }
+        if source?.provider == .mistral {
+            setStatus("\(items.count) Vibe session\(items.count == 1 ? "" : "s")")
+            return
+        }
         let code = items.filter(\.isCode).count
         let chats = items.count - code
         setStatus("\(code) Code session\(code == 1 ? "" : "s")  ·  \(chats) chat\(chats == 1 ? "" : "s")")
@@ -597,7 +945,7 @@ final class TransferWindowController: NSWindowController, NSTableViewDataSource,
         let heading = NSTextField(labelWithString: "Move a session or a chat to another account")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let explainer = NSTextField(wrappingLabelWithString: "T3 Code conversations can be copied to Claude Code or Codex as text; attachments and tool state stay in T3. Any chat, Code session or Codex thread can also start a new T3 thread, which gets the conversation as its first message. Between Claude accounts, a Code session moves whole and costs nothing - both accounts end up on the same transcript. A chat is copied: the destination gets the conversation attached and one reply to pick it up. Between Claude Code and Codex, the session is translated and copied, so the two carry on independently.")
+        let explainer = NSTextField(wrappingLabelWithString: "Move or copy conversations across Claude, ChatGPT (Codex), Gemini (Antigravity), Mistral (Vibe) and T3 Code. Between Claude accounts, a Code session moves whole and costs nothing. Chats and Gemini handoffs are seeded into a fresh conversation in the destination account; Mistral handoffs are copied to the clipboard and open Vibe ready to paste.")
         explainer.font = .systemFont(ofSize: 11)
         explainer.textColor = .secondaryLabelColor
 
@@ -753,6 +1101,12 @@ private final class ItemRowView: NSTableCellView {
         case .codex:
             badge.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Codex thread")
             badge.contentTintColor = .systemOrange
+        case .gemini:
+            badge.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Gemini conversation")
+            badge.contentTintColor = .systemIndigo
+        case .mistral:
+            badge.image = NSImage(systemSymbolName: "wind", accessibilityDescription: "Mistral Vibe session")
+            badge.contentTintColor = .systemYellow
         }
         badge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
 

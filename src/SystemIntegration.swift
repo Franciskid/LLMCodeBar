@@ -89,6 +89,10 @@ enum Launcher {
             return
         }
 
+        if profile.provider == .gemini {
+            GeminiAuthStore.activateForAppLaunch(profile)
+        }
+
         var options = ["-n"]
         if quietly {
             options += ["-g"]
@@ -233,11 +237,15 @@ enum RunningProfileDetector {
     /// Last resort for an instance that never named a directory: the Electron default,
     /// `~/Library/Application Support/<CFBundleName>`.
     private static func defaultDataDir(forAppPath appPath: String) -> String? {
-        let name = (Bundle(path: appPath)?.object(forInfoDictionaryKey: "CFBundleName") as? String)
-            ?? URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
-        guard !name.isEmpty else { return nil }
+        let bundle = Bundle(path: appPath)
         let support = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
+        if bundle?.bundleIdentifier == MistralAuthStore.bundleIdentifier {
+            return normalized(support.appendingPathComponent("le-chat-desktop", isDirectory: true).path)
+        }
+        let name = (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
+        guard !name.isEmpty else { return nil }
         return normalized(support.appendingPathComponent(name, isDirectory: true).path)
     }
 

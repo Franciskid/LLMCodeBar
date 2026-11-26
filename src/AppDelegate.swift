@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let motion = MenuMotion()
         var fold: AccountsFoldView?
         if config.profiles.isEmpty {
-            let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude and ChatGPT accounts..." : "No Claude/ChatGPT accounts found", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: refreshInFlight ? "Finding Claude, ChatGPT, Gemini and Mistral accounts..." : "No Claude/ChatGPT/Gemini/Mistral accounts found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
             menu.addItem(NSMenuItem.separator())
@@ -442,6 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshAllAsync() {
         guard !refreshInFlight else { return }
         refreshInFlight = true
+        let startedWithIDs = Set(config.profiles.map(\.id))
         updateStatusIcon()
         rebuildMenu()
 
@@ -465,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // A network request can finish after an edit in Settings. Merge readings
                 // into the live preferences so a slow refresh cannot undo that edit.
                 var merged = self.config
-                let removedIDs = Set(loaded.profiles.map(\.id)).subtracting(self.config.profiles.map(\.id))
+                let removedIDs = startedWithIDs.subtracting(self.config.profiles.map(\.id))
                 merged.profiles = refreshed.profiles.filter { !removedIDs.contains($0.id) }.map { reading in
                     guard let live = self.config.profiles.first(where: { $0.id == reading.id }) else { return reading }
                     var profile = reading

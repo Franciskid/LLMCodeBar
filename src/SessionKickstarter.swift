@@ -5,9 +5,11 @@ import Foundation
 /// counter so the window is "running" without the user having to open the app.
 ///
 /// Notes / caveats:
-/// - Claude uses its private web endpoints (the same ones the desktop app uses);
-///   Codex uses the token-based backend the Codex CLI uses. Both are unofficial and
-///   may change; failures are surfaced as text and never crash anything.
+/// - Every start goes through the provider's own tool, never a raw API call: Claude
+///   Code (`claude -p`) for Claude, `codex app-server` for ChatGPT, Antigravity's
+///   `language_server` for Gemini. Only when that tool is missing (or, for Claude, not
+///   signed in to the account) does it fall back to the old direct route, so the 5h
+///   start keeps working; the result text says when that happened.
 /// - It consumes a negligible amount of quota by design - that's what starts the window.
 enum SessionKickstarter {
     private static let queue = DispatchQueue(label: "fr.fraserv.llmusagebar.session-kick")
@@ -133,6 +135,16 @@ enum SessionKickstarter {
             guard let window else { return true }
             if let reset = window.resetsAt, reset <= Date() { return true }
             return window.usedPercent <= 0.5
+        case .gemini:
+            // Antigravity clears the placeholder reset time when the 5h bucket hasn't
+            // started yet, so a future reset time means the 5h clock is already running.
+            let window = usage.windows.first { $0.title == "5h" } ?? usage.windows.first
+            guard let window else { return true }
+            if let reset = window.resetsAt { return reset <= Date() }
+            return window.usedPercent <= 0.5
+        case .mistral:
+            // Mistral uses a monthly API-equivalent budget with no 5h rolling session clock.
+            return false
         }
     }
 
@@ -158,12 +170,47 @@ enum SessionKickstarter {
         switch profile.provider {
         case .claude: return startClaudeSession(profile, allowKeychain: allowKeychain)
         case .codex: return startCodexSession(profile)
+        case .gemini: return startGeminiSession(profile)
+        case .mistral: return "Mistral uses a monthly budget with no 5-hour session window to start."
+        }
+    }
+
+    // MARK: Gemini (via Antigravity)
+
+    /// Starts a Gemini 5-hour session strictly through Google Antigravity's own
+    /// `language_server` (never calling raw Gemini/Cloud Code APIs directly).
+    private static func startGeminiSession(_ profile: LaunchProfile) -> String {
+        do {
+            return try GeminiLanguageServer.kickFiveHourSession(for: profile)
+        } catch {
+            return "Failed to start Gemini session: \(error.localizedDescription)"
         }
     }
 
     // MARK: Claude
 
+    /// Starts the window through the official Claude Code CLI when this account has a
+    /// Claude Code login. Without one it falls back to claude.ai's web endpoints, so the
+    /// 5h start keeps working until the account is signed in to Claude Code.
     private static func startClaudeSession(_ profile: LaunchProfile, allowKeychain: Bool) -> String {
+        guard let login = ClaudeCodeCLI.login(for: profile) else {
+            let reason = ClaudeCodeCLI.executable() == nil
+                ? "Claude Code isn't installed"
+                : "no Claude Code login for \(profile.accountEmail ?? "this account")"
+            return startClaudeSessionOnWeb(profile, allowKeychain: allowKeychain)
+                + " (Went through claude.ai because \(reason). Sign in to Claude Code in Settings → Sessions.)"
+        }
+        do {
+            let model = try ClaudeCodeCLI.sendThrowawayHi(login: login)
+            return "Started a 5h session - sent “hi” via Claude Code (\(login.displayPath)) on \(model)."
+        } catch {
+            return "Couldn't start Claude session via Claude Code (\(login.displayPath)): \(error.localizedDescription)"
+        }
+    }
+
+    /// The old route: a throwaway chat on claude.ai's private web endpoints, with the
+    /// desktop app's cookies. Kept only for accounts with no Claude Code login.
+    private static func startClaudeSessionOnWeb(_ profile: LaunchProfile, allowKeychain: Bool) -> String {
         do {
             let cookieHeader = try UsageRefresher.claudeCookieHeader(for: profile, allowKeychain: allowKeychain)
             let orgID = try UsageRefresher.claudeOrganizationID(cookieHeader: cookieHeader)
@@ -226,12 +273,31 @@ enum SessionKickstarter {
         _ = try? SimpleHTTP.send(url, method: "DELETE", headers: headers, timeout: 8)
     }
 
-    // MARK: Codex (experimental)
+    // MARK: Codex
 
-    /// Codex authenticates with the same bearer token the Codex CLI uses, so we can
-    /// hit its `responses` backend directly (no browser bot-protection). Experimental:
-    /// endpoint/model may need tweaks, so errors are surfaced verbatim.
+    /// Starts the window through the official Codex CLI (`codex app-server`): a
+    /// throwaway thread Codex never saves, sending "hi" on the cheapest model. Only when
+    /// no Codex CLI can be found does it fall back to calling ChatGPT's backend directly.
     private static func startCodexSession(_ profile: LaunchProfile) -> String {
+        guard CodexSessionTransfer.hasCLI(for: profile) else {
+            return startCodexSessionDirectly(profile)
+                + " (No Codex CLI found, so this went to ChatGPT directly. Install the ChatGPT app or `brew install codex`.)"
+        }
+        var models = Array(cheapestCodexModels(for: profile).prefix(3))
+        if let configured = CodexAuthStore.configuredModel(dataDir: profile.dataDir), !models.contains(configured) {
+            models.append(configured)
+        }
+        do {
+            let model = try CodexSessionTransfer.sendThrowawayHi(for: profile, models: models)
+            return "Started a ChatGPT 5h session - sent “hi” via the Codex CLI on \(model)."
+        } catch {
+            return "Couldn't start ChatGPT session via the Codex CLI: \(error.localizedDescription)"
+        }
+    }
+
+    /// The old route: ChatGPT's `responses` backend called with the Codex CLI's token.
+    /// Kept only for machines with no Codex CLI at all.
+    private static func startCodexSessionDirectly(_ profile: LaunchProfile) -> String {
         do {
             var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
             // Try the account's own configured model first; the ChatGPT backend rejects

@@ -15,6 +15,10 @@ enum UsageRefresher {
                 profile = refreshClaude(profile, allowKeychain: allowKeychain)
             case .codex:
                 profile = refreshCodex(profile)
+            case .gemini:
+                profile = refreshGemini(profile)
+            case .mistral:
+                profile = refreshMistral(profile, allowKeychain: allowKeychain)
             }
             lock.lock()
             refreshed[index] = profile
@@ -38,6 +42,10 @@ enum UsageRefresher {
                     return claudeProof(profile)
                 case .codex:
                     return codexProof(profile)
+                case .gemini:
+                    return geminiProof(profile)
+                case .mistral:
+                    return mistralProof(profile)
                 }
             })
     }
@@ -94,29 +102,10 @@ enum UsageRefresher {
     }
 
     private static func codexProof(_ profile: LaunchProfile) -> QuotaProof {
-        let endpoint = "https://chatgpt.com/backend-api/wham/usage"
+        let endpoint = "codex app-server · account/rateLimits/read"
         let account = CodexAuthStore.accountInfo(dataDir: profile.dataDir)
         do {
-            var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
-            var response = try codexUsageResponse(credentials: credentials)
-            if response.statusCode == 401 || response.statusCode == 403 {
-                credentials = try CodexAuthStore.refreshCredentials(credentials)
-                response = try codexUsageResponse(credentials: credentials)
-            }
-            guard (200...299).contains(response.statusCode),
-                  let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
-                return QuotaProof(
-                    provider: profile.provider,
-                    email: account?.email ?? profile.accountEmail,
-                    plan: account?.plan ?? profile.accountPlan,
-                    endpoint: endpoint,
-                    httpStatus: response.statusCode,
-                    status: "ChatGPT usage HTTP \(response.statusCode)",
-                    parserMatchesProvider: false,
-                    windows: [],
-                    creditsRemaining: nil)
-            }
-
+            let json = try codexUsageJSON(profile: profile).usage
             let rateLimit = json["rate_limit"] as? [String: Any]
             let windows = [
                 codexProofWindow(rateLimit?["primary_window"]),
@@ -131,7 +120,7 @@ enum UsageRefresher {
                 email: account?.email ?? profile.accountEmail,
                 plan: plan,
                 endpoint: endpoint,
-                httpStatus: response.statusCode,
+                httpStatus: nil,
                 status: windows.isEmpty && balance == nil ? "ChatGPT usage unavailable" : nil,
                 parserMatchesProvider: !windows.isEmpty && windows.allSatisfy(\.matches),
                 windows: windows,
@@ -258,6 +247,145 @@ enum UsageRefresher {
         return profile
     }
 
+    private static func refreshGemini(_ profile: LaunchProfile) -> LaunchProfile {
+        var profile = profile
+        do {
+            let snapshot = try GeminiLanguageServer.fetchUsage(for: profile)
+            if let email = snapshot.account.email {
+                profile.accountEmail = email
+                profile.accountUUID = email.lowercased()
+                profile.label = "\(profile.provider.displayName) - \(email)"
+                profile.signedIn = true
+                profile.isPendingLogin = false
+                profile.identityVerified = true
+            }
+            if let name = snapshot.account.name {
+                profile.accountName = name
+                if profile.accountEmail == nil {
+                    profile.label = "\(profile.provider.displayName) - \(name)"
+                    profile.signedIn = true
+                    profile.isPendingLogin = false
+                }
+            }
+            if let plan = snapshot.account.plan {
+                profile.accountPlan = plan
+            }
+            profile.usage = UsageInfo(
+                source: "antigravity-ls",
+                status: snapshot.windows.isEmpty ? "Gemini usage unavailable" : nil,
+                windows: snapshot.windows,
+                creditsRemaining: nil,
+                accountEmail: snapshot.account.email ?? profile.accountEmail,
+                accountPlan: snapshot.account.plan ?? profile.accountPlan,
+                updatedAt: Date(),
+                manualResets: nil)
+            profile.usageStale = false
+            profile.refreshError = nil
+        } catch {
+            applyFailure(&profile, source: "antigravity-ls", error: error)
+        }
+        return profile
+    }
+
+    private static func geminiProof(_ profile: LaunchProfile) -> QuotaProof {
+        let endpoint = "antigravity://language_server/RetrieveUserQuotaSummary"
+        do {
+            let snapshot = try GeminiLanguageServer.fetchUsage(for: profile)
+            return QuotaProof(
+                provider: profile.provider,
+                email: snapshot.account.email ?? profile.accountEmail,
+                plan: snapshot.account.plan ?? profile.accountPlan,
+                endpoint: endpoint,
+                httpStatus: 200,
+                status: snapshot.proofWindows.isEmpty ? "Gemini usage unavailable" : nil,
+                parserMatchesProvider: !snapshot.proofWindows.isEmpty && snapshot.proofWindows.allSatisfy(\.matches),
+                windows: snapshot.proofWindows,
+                creditsRemaining: nil)
+        } catch {
+            return QuotaProof(
+                provider: profile.provider,
+                email: profile.accountEmail,
+                plan: profile.accountPlan,
+                endpoint: endpoint,
+                httpStatus: nil,
+                status: error.localizedDescription,
+                parserMatchesProvider: false,
+                windows: [],
+                creditsRemaining: nil)
+        }
+    }
+
+    private static func refreshMistral(_ profile: LaunchProfile, allowKeychain: Bool) -> LaunchProfile {
+        var profile = profile
+        do {
+            let snapshot = try MistralAuthStore.fetchUsage(for: profile, allowKeychain: allowKeychain)
+            if let email = snapshot.account.email {
+                profile.accountEmail = email
+                profile.accountUUID = snapshot.account.userID ?? email.lowercased()
+                profile.label = "\(profile.provider.displayName) - \(email)"
+                profile.signedIn = true
+                profile.isPendingLogin = false
+                profile.identityVerified = true
+            } else if let name = snapshot.account.name {
+                profile.accountName = name
+                profile.label = "\(profile.provider.displayName) - \(name)"
+                profile.signedIn = true
+                profile.isPendingLogin = false
+            }
+            if let name = snapshot.account.name {
+                profile.accountName = name
+            }
+            if let orgID = snapshot.account.organizationID {
+                profile.organizationUUID = orgID
+            }
+            if let plan = snapshot.account.plan {
+                profile.accountPlan = plan
+            }
+            profile.usage = UsageInfo(
+                source: snapshot.viaCLI ? "vibe-cli" : "mistral-trpc",
+                status: snapshot.status,
+                windows: snapshot.windows,
+                creditsRemaining: nil,
+                accountEmail: snapshot.account.email ?? profile.accountEmail,
+                accountPlan: snapshot.account.plan ?? profile.accountPlan,
+                updatedAt: Date(),
+                manualResets: nil)
+            profile.usageStale = false
+            profile.refreshError = nil
+        } catch {
+            applyFailure(&profile, source: "mistral-trpc", error: error)
+        }
+        return profile
+    }
+
+    private static func mistralProof(_ profile: LaunchProfile) -> QuotaProof {
+        let endpoint = "https://chat.mistral.ai/api/trpc/billing.budget"
+        do {
+            let snapshot = try MistralAuthStore.fetchUsage(for: profile, allowKeychain: true)
+            return QuotaProof(
+                provider: profile.provider,
+                email: snapshot.account.email ?? profile.accountEmail,
+                plan: snapshot.account.plan ?? profile.accountPlan,
+                endpoint: snapshot.viaCLI ? "vibe-app-server · account/read" : endpoint,
+                httpStatus: 200,
+                status: snapshot.status,
+                parserMatchesProvider: !snapshot.proofWindows.isEmpty && snapshot.proofWindows.allSatisfy(\.matches),
+                windows: snapshot.proofWindows,
+                creditsRemaining: nil)
+        } catch {
+            return QuotaProof(
+                provider: profile.provider,
+                email: profile.accountEmail,
+                plan: profile.accountPlan,
+                endpoint: endpoint,
+                httpStatus: nil,
+                status: error.localizedDescription,
+                parserMatchesProvider: false,
+                windows: [],
+                creditsRemaining: nil)
+        }
+    }
+
     static func claudeOrganizationID(cookieHeader: String) throws -> String {
         if let direct = cookieValue("lastActiveOrg", in: cookieHeader) {
             return direct
@@ -376,16 +504,7 @@ enum UsageRefresher {
     }
 
     private static func codexUsage(profile: LaunchProfile) throws -> UsageInfo {
-        var credentials = try CodexAuthStore.loadCredentials(dataDir: profile.dataDir)
-        var response = try codexUsageResponse(credentials: credentials)
-        if response.statusCode == 401 || response.statusCode == 403 {
-            credentials = try CodexAuthStore.refreshCredentials(credentials)
-            response = try codexUsageResponse(credentials: credentials)
-        }
-        guard (200...299).contains(response.statusCode),
-              let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
-            throw NSError(domain: "LLMUsageBar.Codex", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "ChatGPT usage HTTP \(response.statusCode)"])
-        }
+        let (json, resetJSON) = try codexUsageJSON(profile: profile)
 
         let account = CodexAuthStore.accountInfo(dataDir: profile.dataDir)
         let plan = CodexAuthStore.displayPlan((json["plan_type"] as? String) ?? account?.plan)
@@ -399,18 +518,11 @@ enum UsageRefresher {
         let credits = json["credits"] as? [String: Any]
         let balance = flexibleDouble(credits?["balance"])
 
-        var manualResets: ManualResetInventory?
-        var resetHeaders = ["Authorization": "Bearer \(credentials.accessToken)", "Accept": "application/json", "User-Agent": "LLMCodeBar"]
-        if let id = credentials.accountID { resetHeaders["ChatGPT-Account-Id"] = id }
-        if let resetResponse = try? SimpleHTTP.get(URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!, headers: resetHeaders),
-           resetResponse.statusCode == 200,
-           let resetJSON = try? JSONSerialization.jsonObject(with: resetResponse.data) as? [String: Any] {
-            manualResets = ManualResets.codex(resetJSON)
-        }
-        manualResets = manualResets ?? ManualResets.unavailable(previous: profile.usage?.manualResets, message: "Could not read manual reset inventory")
+        let manualResets = resetJSON.flatMap { ManualResets.codex($0) }
+            ?? ManualResets.unavailable(previous: profile.usage?.manualResets, message: "Could not read manual reset inventory")
 
         return UsageInfo(
-            source: "codex-oauth",
+            source: "codex-cli",
             status: windows.isEmpty && balance == nil ? "ChatGPT usage unavailable" : nil,
             windows: windows,
             creditsRemaining: balance,
@@ -420,18 +532,53 @@ enum UsageRefresher {
             manualResets: manualResets)
     }
 
-    private static func codexUsageResponse(credentials: CodexCredentials) throws -> HTTPResponse {
-        var headers = [
-            "Authorization": "Bearer \(credentials.accessToken)",
-            "Accept": "application/json",
-            "User-Agent": "LLMUsageBar",
-        ]
-        if let accountID = credentials.accountID {
-            headers["ChatGPT-Account-Id"] = accountID
+    /// ChatGPT usage as the official Codex CLI reads it (`account/rateLimits/read` on
+    /// `codex app-server`), reshaped into the field names the parsers above use. Nothing
+    /// here talks to ChatGPT directly: Codex makes the request and handles its own login.
+    private static func codexUsageJSON(profile: LaunchProfile) throws -> (usage: [String: Any], resets: [String: Any]?) {
+        guard CodexSessionTransfer.hasCLI(for: profile) else {
+            throw NSError(domain: "LLMUsageBar.Codex", code: 1, userInfo: [NSLocalizedDescriptionKey: "Codex CLI not found. Install the ChatGPT app or run `brew install codex`."])
         }
-        return try SimpleHTTP.get(
-            URL(string: "https://chatgpt.com/backend-api/wham/usage")!,
-            headers: headers)
+        return codexUsageJSON(fromAppServer: try CodexSessionTransfer.rateLimits(for: profile))
+    }
+
+    static func codexUsageJSON(fromAppServer response: [String: Any]) -> (usage: [String: Any], resets: [String: Any]?) {
+        let limits = (response["rateLimits"] as? [String: Any])
+            ?? ((response["rateLimitsByLimitId"] as? [String: Any])?["codex"] as? [String: Any])
+            ?? [:]
+        func window(_ raw: Any?) -> [String: Any]? {
+            guard let block = raw as? [String: Any], let used = flexibleDouble(block["usedPercent"]) else { return nil }
+            var result: [String: Any] = ["used_percent": used]
+            if let minutes = flexibleDouble(block["windowDurationMins"]) { result["limit_window_seconds"] = minutes * 60 }
+            if let reset = flexibleDouble(block["resetsAt"]) { result["reset_at"] = reset }
+            return result
+        }
+        var rateLimit: [String: Any] = [:]
+        rateLimit["primary_window"] = window(limits["primary"])
+        rateLimit["secondary_window"] = window(limits["secondary"])
+        var usage: [String: Any] = ["rate_limit": rateLimit]
+        if let plan = limits["planType"] as? String { usage["plan_type"] = plan }
+        if let credits = limits["credits"] as? [String: Any] {
+            usage["credits"] = ["balance": credits["balance"] ?? NSNull()]
+        }
+
+        var resets: [String: Any]?
+        if let summary = response["rateLimitResetCredits"] as? [String: Any],
+           let credits = summary["credits"] as? [[String: Any]] {
+            resets = ["credits": credits.map { credit -> [String: Any] in
+                var entry: [String: Any] = [
+                    "status": credit["status"] ?? "",
+                    "reset_type": credit["resetType"] as? String == "codexRateLimits" ? "codex_rate_limits" : (credit["resetType"] ?? ""),
+                ]
+                if let expiry = flexibleDouble(credit["expiresAt"]) {
+                    entry["expires_at"] = isoString(Date(timeIntervalSince1970: expiry)) ?? NSNull()
+                } else {
+                    entry["expires_at"] = NSNull()
+                }
+                return entry
+            }]
+        }
+        return (usage, resets)
     }
 
     private static func appendCodexWindow(_ raw: Any?, windows: inout [UsageWindow]) {

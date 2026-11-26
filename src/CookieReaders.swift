@@ -76,6 +76,113 @@ enum ElectronCookieReader {
         return joined(plaintext)
     }
 
+    static func safeStoragePassphrase(forServices services: [String], allowKeychain: Bool) throws -> (service: String, passphrase: String) {
+        for service in services {
+            if let cached = SafeStorageKeyCache.cachedKey(for: service) {
+                return (service, cached)
+            }
+        }
+        guard allowKeychain else {
+            throw NSError(
+                domain: "LLMUsageBar.Cookies",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Keychain access is off in Settings."])
+        }
+        for service in services {
+            if let key = keychainPassword(service: service) {
+                SafeStorageKeyCache.store(key: key, for: service)
+                return (service, key)
+            }
+        }
+        throw NSError(
+            domain: "LLMUsageBar.Cookies",
+            code: 4,
+            userInfo: [NSLocalizedDescriptionKey: "Safe Storage key not found in Keychain."])
+    }
+
+    static func decryptSafeStorage(_ encrypted: Data, passphrase: String) -> Data? {
+        guard encrypted.count > 3 else { return nil }
+        let prefix = String(data: encrypted.prefix(3), encoding: .utf8)
+        let cipher = (prefix == "v10" || prefix == "v11") ? Data(encrypted.dropFirst(3)) : encrypted
+        guard let key = deriveSafeStorageKey(passphrase: passphrase) else { return nil }
+        let iv = Array(repeating: UInt8(ascii: " "), count: kCCBlockSizeAES128)
+        var output = Array(repeating: UInt8(0), count: cipher.count + kCCBlockSizeAES128)
+        let outputCapacity = output.count
+        var outputLength = 0
+        let cryptStatus = cipher.withUnsafeBytes { cipherBytes in
+            key.withUnsafeBytes { keyBytes in
+                iv.withUnsafeBytes { ivBytes in
+                    output.withUnsafeMutableBytes { outputBytes in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            cipherBytes.baseAddress,
+                            cipher.count,
+                            outputBytes.baseAddress,
+                            outputCapacity,
+                            &outputLength)
+                    }
+                }
+            }
+        }
+        guard cryptStatus == kCCSuccess else { return nil }
+        return Data(output.prefix(outputLength))
+    }
+
+    static func encryptSafeStorage(_ plaintext: Data, passphrase: String) -> Data? {
+        guard let key = deriveSafeStorageKey(passphrase: passphrase) else { return nil }
+        let iv = Array(repeating: UInt8(ascii: " "), count: kCCBlockSizeAES128)
+        var output = Array(repeating: UInt8(0), count: plaintext.count + kCCBlockSizeAES128)
+        let outputCapacity = output.count
+        var outputLength = 0
+        let cryptStatus = plaintext.withUnsafeBytes { plainBytes in
+            key.withUnsafeBytes { keyBytes in
+                iv.withUnsafeBytes { ivBytes in
+                    output.withUnsafeMutableBytes { outputBytes in
+                        CCCrypt(
+                            CCOperation(kCCEncrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            plainBytes.baseAddress,
+                            plaintext.count,
+                            outputBytes.baseAddress,
+                            outputCapacity,
+                            &outputLength)
+                    }
+                }
+            }
+        }
+        guard cryptStatus == kCCSuccess else { return nil }
+        var result = Data("v10".utf8)
+        result.append(contentsOf: output.prefix(outputLength))
+        return result
+    }
+
+    private static func deriveSafeStorageKey(passphrase: String) -> [UInt8]? {
+        let salt = Array("saltysalt".utf8)
+        var key = Array(repeating: UInt8(0), count: kCCKeySizeAES128)
+        let status = passphrase.withCString { password in
+            CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                password,
+                strlen(password),
+                salt,
+                salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                1003,
+                &key,
+                key.count)
+        }
+        return status == kCCSuccess ? key : nil
+    }
+
     private static func joined(_ cookies: [Cookie]) -> String {
         cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
@@ -96,7 +203,7 @@ enum ElectronCookieReader {
         let guessed = service
             .replacingOccurrences(of: " Safe Storage", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        var candidates: [String?] = guessed.isEmpty ? [] : [guessed]
+        var candidates: [String?] = guessed.isEmpty ? [] : [guessed, "\(guessed) Key"]
         candidates.append(nil)
         return candidates
     }

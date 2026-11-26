@@ -10,7 +10,7 @@ final class UsageNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UsageNotifier()
 
     /// Only these limits notify; the rest are informational.
-    static let watchedWindows: Set<String> = ["5h", "Week"]
+    static let watchedWindows: Set<String> = ["5h", "Week", "Month"]
 
     private let defaultsKey = "notifiedUsageLevels"
     private var authorized: Bool?
@@ -144,7 +144,7 @@ final class UsageNotifier: NSObject, UNUserNotificationCenterDelegate {
         }
 
         // Forget windows that have long since ended.
-        let cutoff = Int(Date().addingTimeInterval(-8 * 86_400).timeIntervalSince1970) / 60
+        let cutoff = Int(Date().addingTimeInterval(-35 * 86_400).timeIntervalSince1970) / 60
         notified = notified.filter { key, _ in
             guard let minutes = key.split(separator: "|").last.flatMap({ Int($0) }) else { return false }
             return minutes == 0 || minutes > cutoff
@@ -157,7 +157,14 @@ final class UsageNotifier: NSObject, UNUserNotificationCenterDelegate {
     private func resetText(_ window: UsageWindow) -> String {
         guard let reset = window.resetsAt, reset > Date() else { return "" }
         let formatter = DateFormatter()
-        formatter.dateFormat = Calendar.current.isDateInToday(reset) ? "HH:mm" : "EEE HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        if Calendar.current.isDateInToday(reset) {
+            formatter.dateFormat = "HH:mm"
+        } else if reset.timeIntervalSinceNow >= 6 * 86_400 {
+            formatter.dateFormat = "MMM d"
+        } else {
+            formatter.dateFormat = "EEE HH:mm"
+        }
         return ", resets \(formatter.string(from: reset))"
     }
 

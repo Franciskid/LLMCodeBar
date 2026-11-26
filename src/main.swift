@@ -63,6 +63,26 @@ if CommandLine.arguments.contains("--prove-quota-json") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--test-mistral-live") {
+    let config = ConfigStore.shared.load()
+    let profiles = config.profiles.filter { $0.provider == .mistral }
+    if profiles.isEmpty {
+        print("No Mistral profile found in config.")
+        exit(1)
+    }
+    for profile in profiles {
+        do {
+            let snap = try MistralAuthStore.fetchUsage(for: profile, allowKeychain: true)
+            let wins = snap.windows.map { "\($0.title): \(Int($0.usedPercent.rounded()))% (\($0.detail ?? "-")) resets=\($0.resetsAt?.description ?? "-")" }
+            print("OK email=\(snap.account.email ?? "-") plan=\(snap.account.plan ?? "-") payg=\(snap.paygEnabled) windows=\(wins) status=\(snap.status ?? "nil")")
+        } catch {
+            print("ERR \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--dump-running-json") {
     let config = ConfigStore.shared.load()
     let running = RunningProfileDetector.snapshot(config.profiles)

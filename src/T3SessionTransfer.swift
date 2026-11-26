@@ -60,7 +60,7 @@ enum T3SessionTransfer {
         return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
 
-    static func transcript(_ thread: Thread, database: URL = database) throws -> (String, Data) {
+    static func steps(_ thread: Thread, database: URL = database) throws -> [CodexStep] {
         let messages = try rows("""
             SELECT role, payload_json FROM orchestration_v2_projection_messages
             WHERE thread_id = ? AND role IN ('user','assistant') AND streaming = 0
@@ -76,6 +76,11 @@ enum T3SessionTransfer {
         guard steps.contains(where: \.isUserMessage) else {
             throw CodexSessionTransfer.error("This T3 thread has no completed messages to copy.")
         }
+        return steps
+    }
+
+    static func transcript(_ thread: Thread, database: URL = database) throws -> (String, Data) {
+        let steps = try steps(thread, database: database)
         let id = UUID().uuidString.lowercased()
         var writer = ClaudeTranscriptWriter(sessionID: id, cwd: thread.cwd, gitBranch: nil)
         _ = writer.write(steps, title: thread.title, source: "T3 Code (conversation text only; attachments and tool state were not copied)")

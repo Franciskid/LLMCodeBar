@@ -3,6 +3,8 @@ import Foundation
 enum Provider: String, Codable, CaseIterable {
     case claude = "Claude"
     case codex = "Codex"
+    case gemini = "Gemini"
+    case mistral = "Mistral"
 
     /// User-facing name. OpenAI's Codex desktop app is now the ChatGPT app, so we show
     /// "ChatGPT" while keeping the stored rawValue "Codex" for config, keychain, and
@@ -11,12 +13,18 @@ enum Provider: String, Codable, CaseIterable {
         switch self {
         case .claude: return "Claude"
         case .codex: return "ChatGPT"
+        case .gemini: return "Gemini"
+        case .mistral: return "Mistral"
         }
     }
 
-    /// Resolve a provider from either its display name ("ChatGPT") or stored rawValue.
+    /// Resolve a provider from either its display name ("ChatGPT"), alias ("Antigravity",
+    /// "Vibe", "Le Chat"), or stored rawValue.
     static func named(_ name: String) -> Provider? {
-        allCases.first { $0.displayName == name || $0.rawValue == name }
+        if name.caseInsensitiveCompare("Antigravity") == .orderedSame { return .gemini }
+        if name.caseInsensitiveCompare("Vibe") == .orderedSame ||
+            name.caseInsensitiveCompare("Le Chat") == .orderedSame { return .mistral }
+        return allCases.first { $0.displayName == name || $0.rawValue == name }
     }
 }
 
@@ -25,21 +33,33 @@ struct UsageWindow: Codable {
     var usedPercent: Double
     var remainingPercent: Double
     var resetsAt: Date?
+    /// Optional provider-specific detail shown alongside the percentage (e.g. "$4.20 / $20"
+    /// for Mistral's monthly API-equivalent budget).
+    var detail: String? = nil
 
-    /// The 5h and weekly limits.
-    var isPrimary: Bool { title == "5h" || title == "Week" }
+    /// The primary quota limits (5h, weekly, or monthly).
+    var isPrimary: Bool { title == "5h" || title == "Week" || title == "Month" }
 
     var displayText: String {
         let remaining = Int(remainingPercent.rounded())
+        let amount = detail.map { " (\($0))" } ?? ""
         if let resetsAt {
-            return "\(remaining)% left - resets \(Self.shortResetFormatter.string(from: resetsAt))"
+            let formatter = resetsAt.timeIntervalSinceNow >= 6 * 86_400 ? Self.monthResetFormatter : Self.shortResetFormatter
+            return "\(remaining)% left\(amount) - resets \(formatter.string(from: resetsAt))"
         }
-        return "\(remaining)% left"
+        return "\(remaining)% left\(amount)"
     }
 
     private static let shortResetFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private static let monthResetFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter
     }()
@@ -167,8 +187,10 @@ struct LaunchProfile: Codable, Identifiable {
     var manualResetExpiryAlertHours: Int?
 
     func visibleWindows() -> [UsageWindow] {
-        (usage?.windows ?? []).filter {
-            $0.title == "5h" ? (showSessionWindow ?? true) : (showWeeklyWindows ?? true)
+        (usage?.windows ?? []).filter { window in
+            if window.title == "5h" { return showSessionWindow ?? true }
+            if window.title == "Month" { return (showSessionWindow ?? true) || (showWeeklyWindows ?? true) }
+            return showWeeklyWindows ?? true
         }
     }
 
@@ -424,7 +446,7 @@ struct AppConfig: Codable {
     }
 
     static let maxMenuBarRows = 3
-    static let maxMenuBarColumns = 3
+    static let maxMenuBarColumns = 5
 
     var menuBarGridRows: Int { min(Self.maxMenuBarRows, max(1, menuBarRows ?? 2)) }
     var menuBarGridColumns: Int { min(Self.maxMenuBarColumns, max(1, menuBarColumns ?? 1)) }
