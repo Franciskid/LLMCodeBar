@@ -18,9 +18,9 @@ Plenty of menu bar apps show your Claude or ChatGPT usage. This one is built for
 
 ## Everything else
 
-- Session (5h) and Weekly bars for every account, with reset times, grouped under a Claude and a ChatGPT heading.
+- Session (5h) and Weekly bars (or Monthly for Mistral) for every account, with reset times, grouped by app. With more than three accounts, scrolled-out accounts compress into a horizontal dock of compact chips with concentric rings so every account stays visible at a glance; scrolling scrubs them in and out smoothly and clicking a chip jumps straight to that account.
 - Notifications when a limit passes the percentage you pick (90% by default), when it's used up, and when a used-up limit resets.
-- An Activity Log in the menu with everything that happened in the background: refresh errors, auto-started sessions, sessions continued after a limit, transfers, updates. The menu tells you when there's a new problem, and **Copy All** gives you a report to paste into an issue.
+- An Activity Log in Settings with everything that happened in the background: refresh errors, auto-started sessions, sessions continued after a limit, transfers, updates, and **Copy All** to paste a report into an issue.
 - A 7 day trend line per limit that goes green to red as you get close.
 - Put accounts' 5h % right in the menu bar, each with its app icon so you know which is which. Click the pin next to any account in the dropdown to put it there or take it off, no need to open Settings. Settings > Menu bar sets the layout, from one account up to a 3 by 3 grid of nine, and can put a short label on each icon (the first 2 characters of the email unless you type your own) to tell two accounts of the same app apart. Pin one more than fits and the oldest one steps aside. When the accounts sit on one row there's room for more: the weekly % and how long until each limit resets (3d, 4h, 7m), stacked 5h above weekly or side by side, each part can be turned off.
 
@@ -109,7 +109,7 @@ macOS 13 or newer, universal (Apple Silicon and Intel). You also need the Claude
 
 ## Settings
 
-Settings uses a sidebar: **General** for startup, refresh, updates, cookie access, Claude integration, limit notifications and macOS notification permission; **Menu bar** for grid size, fill order, icon labels, weekly percentage, quota countdowns, arrangement, and preview. **Continue after limits** for what happens to a session at its limit, the message it sends, the order accounts take over in, and answering while you're away. Select an account to open its **Display**, **Sessions**, and **Advanced** sections. Existing preferences, pinned accounts, and custom icon labels are preserved.
+Settings uses a sidebar: **General** for startup, refresh, updates, cookie access, Claude integration, limit notifications and macOS notification permission; **Menu bar** for grid size, fill order, icon labels, weekly percentage, quota countdowns, arrangement, and preview; **Continue after limits** for what happens to a session at its limit, the message it sends, the order accounts take over in, and answering while you're away; **Activity Log** for background events and errors. Select an account to open its **Display**, **Sessions**, and **Advanced** sections. Existing preferences, pinned accounts, and custom icon labels are preserved.
 
 The dropdown groups accounts under a Claude and a ChatGPT heading. Each account is a header line (name, plan, auto-start, open or closed, menu bar pin) and one line per limit: bar, percent used and reset time, or when it's back once it's used up. Each account controls its own bars, trendlines, labels, automatic reset times, and manual-reset visibility. Manual resets sit on one line under the limits with a count and short dates, such as `Fable ×1 17 Nov` or `Full ×3 30 Nov · 1 Dec · 12 Dec`. Current-year dates omit the year; no hour or “expires” prefix is shown.
 

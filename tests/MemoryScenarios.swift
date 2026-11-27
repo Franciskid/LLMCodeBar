@@ -9,15 +9,18 @@ let config = AppConfig(launchAtLogin: false, profiles: [profile])
 struct RetiredViews {
     weak var card: ProfileMenuItemView?
     weak var fold: AccountsFoldView?
+    weak var dock: OverflowDockView?
     weak var panel: ContinuePanelView?
 }
 var retired: [RetiredViews] = []
 var iterations = 0
 let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { timer in
     autoreleasepool {
-        let card = ProfileMenuItemView(profile: profile, target: app, action: #selector(NSApplication.stop(_:)), isRefreshing: false, isRunning: false, showSparklines: true, inMenuBar: true)
+        let cards: [ProfileMenuItemView] = (0..<5).map { _ in
+            ProfileMenuItemView(profile: profile, target: app, action: #selector(NSApplication.stop(_:)), isRefreshing: false, isRunning: false, showSparklines: true, inMenuBar: true)
+        }
         let motion = MenuMotion()
-        let fold = AccountsFoldView(views: [card], motion: motion)
+        let fold = AccountsFoldView(views: cards, maxFullCards: 3, motion: motion)
         let panel = ContinuePanelView(enabled: false, sessions: [], defaults: ContinueDefaults(config), handlers: .init(), motion: motion)
         let top = MenuTopView(accounts: fold, panel: panel, motion: motion)
         let menu = NSMenu()
@@ -25,7 +28,7 @@ let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { timer 
         item.view = top
         menu.addItem(item)
         status.menu = menu
-        retired.append(RetiredViews(card: card, fold: fold, panel: panel))
+        retired.append(RetiredViews(card: cards[0], fold: fold, dock: fold.overflowDockView, panel: panel))
         iterations += 1
         if iterations >= 100 { timer.invalidate(); status.menu = nil }
     }
@@ -34,7 +37,8 @@ while timer.isValid { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
 RunLoop.main.run(until: Date().addingTimeInterval(0.5))
 let cards = retired.filter { $0.card != nil }.count
 let folds = retired.filter { $0.fold != nil }.count
+let docks = retired.filter { $0.dock != nil }.count
 let panels = retired.filter { $0.panel != nil }.count
-print("After 100 menu replacements: \(cards) cards, \(folds) folds, \(panels) panels retained")
+print("After 100 menu replacements: \(cards) cards, \(folds) folds, \(docks) docks, \(panels) panels retained")
 NSStatusBar.system.removeStatusItem(status)
-precondition(cards == 0 && folds == 0 && panels == 0, "Retired menu views must be released")
+precondition(cards == 0 && folds == 0 && docks == 0 && panels == 0, "Retired menu views must be released")

@@ -300,20 +300,35 @@ final class AccountsFoldView: NSView {
     private let motion: MenuMotion
     private var folded = false
     private var entries: [Entry] = []
+    private var cardEntryIndices: [Int] = []
     private let document = FlippedView()
     private var scroll: NSScrollView?
+    private var overflowDock: OverflowDockView?
+    private var scrollObserver: NSObjectProtocol?
+    private var scrollAnimationTimer: Timer?
+    private var lastProgrammaticScrollY: CGFloat?
     private let fullCap: CGFloat
     private static let width: CGFloat = 320
+
+    var scrollView: NSScrollView? { scroll }
+    var overflowDockView: OverflowDockView? { overflowDock }
 
     init(views: [NSView], maxFullCards: Int = 3, motion: MenuMotion = MenuMotion()) {
         self.motion = motion
         var fullCap: CGFloat = 0
         var cards = 0
         var all: [Entry] = []
+        var cardIndices: [Int] = []
+        var cardSummaries: [OverflowAccountSummary] = []
         for view in views {
             let full = view.frame.height
-            let isCard = view is ProfileMenuItemView
-            if isCard { cards += 1 }
+            let card = view as? ProfileMenuItemView
+            let isCard = card != nil
+            if let card {
+                cardIndices.append(all.count)
+                cardSummaries.append(card.overflowSummary)
+                cards += 1
+            }
             if cards <= maxFullCards { fullCap += full }
             let clip = ClipView(frame: NSRect(x: 0, y: 0, width: Self.width, height: full))
             view.frame = NSRect(x: 0, y: 0, width: Self.width, height: full)
@@ -324,6 +339,7 @@ final class AccountsFoldView: NSView {
         }
         self.fullCap = cards > maxFullCards ? fullCap : .greatestFiniteMagnitude
         self.entries = all
+        self.cardEntryIndices = cardIndices
         // Evaluate the reduction before super.init. With Swift 6.1.2's release
         // optimizer, an inline closure here leaves this view retained by AppKit's
         // notification machinery, along with every card and its history arrays.
@@ -338,8 +354,24 @@ final class AccountsFoldView: NSView {
             scroll.drawsBackground = false
             scroll.borderType = .noBorder
             scroll.documentView = document
+            scroll.contentView.postsBoundsChangedNotifications = true
             addSubview(scroll)
             self.scroll = scroll
+
+            let dock = OverflowDockView(summaries: cardSummaries)
+            dock.onSelectIndex = { [weak self] index in
+                self?.scrollToAccount(at: index, animated: true)
+            }
+            addSubview(dock)
+            self.overflowDock = dock
+
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scroll.contentView,
+                queue: nil
+            ) { [weak self] _ in
+                self?.handleScrollBoundsChanged()
+            }
         } else {
             addSubview(document)
         }
@@ -352,6 +384,11 @@ final class AccountsFoldView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    deinit {
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        scrollAnimationTimer?.invalidate()
+    }
+
     private static func drawOnlyWhenAsked(_ view: NSView) {
         view.wantsLayer = true
         view.layerContentsRedrawPolicy = .onSetNeedsDisplay
@@ -362,10 +399,84 @@ final class AccountsFoldView: NSView {
 
     func setFolded(_ folded: Bool, animated: Bool = true) {
         guard folded != self.folded else { return }
+        scrollAnimationTimer?.invalidate()
+        scrollAnimationTimer = nil
+        lastProgrammaticScrollY = nil
         motion.transition(animated: animated) {
             self.folded = folded
             self.layoutForState()
         }
+    }
+
+    /// Smoothly scrolls the native NSScrollView to bring account card `cardIndex` into view
+    /// (including its provider header directly above it when applicable).
+    func scrollToAccount(at cardIndex: Int, animated: Bool = true) {
+        guard let scroll, cardIndex >= 0, cardIndex < cardEntryIndices.count else { return }
+        scrollAnimationTimer?.invalidate()
+        scrollAnimationTimer = nil
+
+        let entryIndex = cardEntryIndices[cardIndex]
+        var targetY = entries[entryIndex].clip.frame.minY
+        if entryIndex > 0, entries[entryIndex - 1].content is ProviderHeaderView {
+            targetY = entries[entryIndex - 1].clip.frame.minY
+        }
+        let maxY = max(0, document.frame.height - scroll.contentView.bounds.height)
+        targetY = min(maxY, max(0, targetY))
+
+        let startY = scroll.contentView.bounds.origin.y
+        guard animated, abs(targetY - startY) > 0.5, !MenuMotion.reduceMotion else {
+            lastProgrammaticScrollY = targetY
+            scroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: targetY))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            lastProgrammaticScrollY = nil
+            updateOverflowDock()
+            return
+        }
+
+        let duration: CFTimeInterval = 0.26
+        let start = CACurrentMediaTime()
+        lastProgrammaticScrollY = startY
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            guard let self, let scroll = self.scroll else {
+                timer.invalidate()
+                return
+            }
+            let elapsed = CACurrentMediaTime() - start
+            let t = min(1.0, max(0.0, elapsed / duration))
+            // Cubic ease-out for a brisk, natural glide.
+            let eased = 1 - pow(1 - t, 3)
+            let y = startY + (targetY - startY) * CGFloat(eased)
+            self.lastProgrammaticScrollY = y
+            scroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            self.updateOverflowDock()
+            if t >= 1 {
+                timer.invalidate()
+                self.scrollAnimationTimer = nil
+                self.lastProgrammaticScrollY = nil
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scrollAnimationTimer = timer
+    }
+
+    private func handleScrollBoundsChanged() {
+        // If the user starts scrolling manually mid-glide, immediately yield control.
+        if let expected = lastProgrammaticScrollY, let actual = scroll?.contentView.bounds.origin.y, abs(actual - expected) > 2 {
+            scrollAnimationTimer?.invalidate()
+            scrollAnimationTimer = nil
+            lastProgrammaticScrollY = nil
+        }
+        updateOverflowDock()
+    }
+
+    func updateOverflowDock() {
+        guard let scroll, let overflowDock else { return }
+        let visibleRect = scroll.contentView.bounds
+        let values = cardEntryIndices.map { index -> CGFloat in
+            OverflowDockView.visibility(forCardRect: entries[index].clip.frame, inVisibleRect: visibleRect)
+        }
+        overflowDock.update(visibilities: values)
     }
 
     /// The cards as they end up: clipped to their header line and slid up inside the
@@ -385,8 +496,14 @@ final class AccountsFoldView: NSView {
         setFrame(of: document, NSRect(x: 0, y: 0, width: Self.width, height: y))
         let cap = lerp(fullCap, max(fullCap * 0.6, 8 * ProfileMenuItemView.foldedHeight), p)
         let visible = pixel(min(y, cap))
+        let dockHeight = overflowDock != nil ? pixel(lerp(OverflowDockView.height, 0, p)) : 0
         if let scroll { setFrame(of: scroll, NSRect(x: 0, y: 0, width: Self.width, height: visible)) }
-        setFrame(of: self, NSRect(origin: frame.origin, size: NSSize(width: Self.width, height: visible)))
+        if let overflowDock {
+            setFrame(of: overflowDock, NSRect(x: 0, y: visible, width: Self.width, height: dockHeight))
+            overflowDock.alphaValue = 1 - p
+        }
+        setFrame(of: self, NSRect(origin: frame.origin, size: NSSize(width: Self.width, height: visible + dockHeight)))
+        updateOverflowDock()
     }
 }
 

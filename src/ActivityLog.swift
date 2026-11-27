@@ -118,22 +118,17 @@ final class ActivityLog {
     }
 }
 
-/// The Activity Log window: every entry, newest at the bottom, with errors in red.
-final class ActivityLogWindowController: NSWindowController {
+/// Reusable Activity Log panel used both in the standalone popup window and inside Settings.
+final class ActivityLogView: NSView {
     private let textView = NSTextView()
     private let errorsOnly = NSButton(checkboxWithTitle: "Errors only", target: nil, action: nil)
+    private let onClose: (() -> Void)?
     private var observer: NSObjectProtocol?
 
-    init() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false)
-        window.title = "LLMCodeBar Activity Log"
-        window.minSize = NSSize(width: 480, height: 260)
-        window.center()
-        super.init(window: window)
+    init(onClose: (() -> Void)?) {
+        self.onClose = onClose
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
         buildUI()
         reload()
         observer = NotificationCenter.default.addObserver(forName: ActivityLog.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -147,14 +142,7 @@ final class ActivityLogWindowController: NSWindowController {
         if let observer { NotificationCenter.default.removeObserver(observer) }
     }
 
-    override func showWindow(_ sender: Any?) {
-        super.showWindow(sender)
-        ActivityLog.shared.markSeen()
-    }
-
     private func buildUI() {
-        guard let content = window?.contentView else { return }
-
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
@@ -170,27 +158,42 @@ final class ActivityLogWindowController: NSWindowController {
 
         errorsOnly.target = self
         errorsOnly.action = #selector(reload)
-        let copy = NSButton(title: "Copy All", target: self, action: #selector(copyAll))
         let reveal = NSButton(title: "Show in Finder", target: self, action: #selector(revealFile))
+        let copy = NSButton(title: "Copy All", target: self, action: #selector(copyAll))
         let clear = NSButton(title: "Clear", target: self, action: #selector(clearLog))
-        for button in [copy, reveal, clear] { button.bezelStyle = .rounded }
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [errorsOnly, spacer, clear, reveal, copy])
+        clear.identifier = NSUserInterfaceItemIdentifier("activityLogClear")
+
+        var barViews: [NSView] = [errorsOnly, {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            return spacer
+        }(), reveal, copy, clear]
+
+        if onClose != nil {
+            let close = NSButton(title: "Close", target: self, action: #selector(closeTapped))
+            close.identifier = NSUserInterfaceItemIdentifier("activityLogClose")
+            close.keyEquivalent = "\u{1b}"
+            close.bezelStyle = .rounded
+            barViews.append(close)
+        }
+        for button in [reveal, copy, clear] { button.bezelStyle = .rounded }
+
+        let bar = NSStackView(views: barViews)
+        bar.identifier = NSUserInterfaceItemIdentifier("activityLogBar")
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.orientation = .horizontal
         bar.spacing = 8
 
-        content.addSubview(scroll)
-        content.addSubview(bar)
+        addSubview(scroll)
+        addSubview(bar)
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
-            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
@@ -199,7 +202,7 @@ final class ActivityLogWindowController: NSWindowController {
         return errorsOnly.state == .on ? entries.filter { $0.level == .error } : entries
     }
 
-    @objc private func reload() {
+    @objc func reload() {
         let entries = visibleEntries
         let text = NSMutableAttributedString()
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -232,5 +235,48 @@ final class ActivityLogWindowController: NSWindowController {
 
     @objc private func clearLog() {
         ActivityLog.shared.clear()
+    }
+
+    @objc private func closeTapped() {
+        onClose?()
+    }
+}
+
+/// The Activity Log window: every entry, newest at the bottom, with errors in red.
+final class ActivityLogWindowController: NSWindowController {
+    private var logView: ActivityLogView?
+
+    init() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.title = "LLMCodeBar Activity Log"
+        window.minSize = NSSize(width: 480, height: 260)
+        window.center()
+        super.init(window: window)
+        buildUI()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        ActivityLog.shared.markSeen()
+        logView?.reload()
+    }
+
+    private func buildUI() {
+        guard let content = window?.contentView else { return }
+        let view = ActivityLogView(onClose: { [weak self] in self?.close() })
+        logView = view
+        content.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            view.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+        ])
     }
 }

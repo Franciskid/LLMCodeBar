@@ -6,7 +6,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var config = ConfigStore.shared.loadCached()
     private var settingsWindow: SettingsWindowController?
     private var transferWindow: TransferWindowController?
-    private var activityLogWindow: ActivityLogWindowController?
     /// The cards and the "Continue after limits" panel of the menu that's showing.
     private var accountsFold: AccountsFoldView?
     private var continuePanel: ContinuePanelView?
@@ -222,21 +221,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The app's own items, apart from the actions above.
         if menu.items.last?.isSeparatorItem != true { menu.addItem(NSMenuItem.separator()) }
 
-        let errors = ActivityLog.shared.unseenErrors
-        let log = NSMenuItem(title: "Activity Log...", action: #selector(showActivityLog), keyEquivalent: "l")
-        log.target = self
-        log.isEnabled = true
-        if errors > 0 {
-            // A quiet count of what's new, not an alarm.
-            let title = NSMutableAttributedString(string: "Activity Log...", attributes: [.font: NSFont.menuFont(ofSize: 0)])
-            title.append(NSAttributedString(string: "   \(errors) new", attributes: [
-                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
-                .foregroundColor: NSColor.systemRed,
-            ]))
-            log.attributedTitle = title
-        }
-        menu.addItem(log)
-
         let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         settings.isEnabled = true
@@ -398,16 +382,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func showActivityLog() {
-        if activityLogWindow == nil {
-            activityLogWindow = ActivityLogWindowController()
-        }
-        activityLogWindow?.showWindow(nil)
-        activityLogWindow?.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        rebuildMenu()
-    }
-
     @objc private func showSettings() {
         openSettings(section: nil)
     }
@@ -429,6 +403,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             },
             onCheckForUpdates: { [weak self] report in
                 self?.checkForUpdates(userInitiated: true, report: report)
+            },
+            onActivityLogViewed: { [weak self] in
+                self?.rebuildMenu()
             })
         if let section { settingsWindow?.select(sectionNamed: section) }
         settingsWindow?.showWindow(nil)

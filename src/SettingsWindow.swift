@@ -8,18 +8,25 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let onChange: (@escaping (inout AppConfig) -> Void) -> Void
     /// Runs a check against GitHub, reporting progress back into `statusLabel`.
     private let onCheckForUpdates: (@escaping (String) -> Void) -> Void
+    private let onActivityLogViewed: (() -> Void)?
 
     private let table = NSTableView()
 
     // Per-account controls.
     private let accountTitle = NSTextField(labelWithString: "")
     private let accountSubtitle = NSTextField(labelWithString: "")
+    private let accountErrorBanner = AppearanceAwareStack()
+    private let accountErrorLabel = NSTextField(wrappingLabelWithString: "")
+    private let accountConnectButton = NSButton(title: "Connect…", target: nil, action: nil)
     private let menuBarAccount = NSButton(checkboxWithTitle: "Show this account's 5h % in the menu bar", target: nil, action: nil)
     private let autoStartSession = NSButton(checkboxWithTitle: "Auto-start 5h session for this account", target: nil, action: nil)
     private let startSessionNow = NSButton(title: "Start 5h session now", target: nil, action: nil)
     private let claudeCodeLogin = NSButton(title: "Sign in to Claude Code…", target: nil, action: nil)
     /// The "Claude Code login" row and its separator, shown only for Claude accounts.
     private var claudeCodeLoginRow: [NSView] = []
+    private let antigravityConnect = NSButton(title: "Connect Antigravity…", target: nil, action: nil)
+    /// The "Antigravity" connection row and its separator, shown only for Gemini accounts.
+    private var antigravityConnectionRow: [NSView] = []
     private let removeButton = NSButton(title: "Remove account", target: nil, action: nil)
     private let labelField = NSTextField()
     private let appPathField = NSTextField()
@@ -81,6 +88,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     // Continue after limits.
     private let continueNavigation = SettingsNavigationButton(title: "Continue after limits", target: nil, action: nil)
+    private let activityLogNavigation = SettingsNavigationButton(title: "Activity Log", target: nil, action: nil)
+    private lazy var activityLogView = ActivityLogView(onClose: { [weak self] in self?.close() })
     private let continuePage = NSStackView()
     private let keepGoing = NSButton(checkboxWithTitle: "Continue sessions after a limit", target: nil, action: nil)
     private let continuePlanPopup = NSPopUpButton()
@@ -108,10 +117,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     init(config: AppConfig,
          onChange: @escaping (@escaping (inout AppConfig) -> Void) -> Void,
-         onCheckForUpdates: @escaping (@escaping (String) -> Void) -> Void) {
+         onCheckForUpdates: @escaping (@escaping (String) -> Void) -> Void,
+         onActivityLogViewed: (() -> Void)? = nil) {
         self.config = config
         self.onChange = onChange
         self.onCheckForUpdates = onCheckForUpdates
+        self.onActivityLogViewed = onActivityLogViewed
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 650),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -167,16 +178,23 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         if table.selectedRow >= 0 { navigate(to: 2) }
     }
 
-    /// Pages, in tab order: General, Menu bar, Account, Continue after limits.
+    /// Pages, in tab order: General, Menu bar, Account, Continue after limits, Activity Log.
     private static let continuePageIndex = 3
+    private static let activityLogPageIndex = 4
 
     private func navigate(to index: Int) {
         pages.selectTabViewItem(at: index)
         generalNavigation.state = index == 0 ? .on : .off
         menuBarNavigation.state = index == 1 ? .on : .off
         continueNavigation.state = index == Self.continuePageIndex ? .on : .off
+        activityLogNavigation.state = index == Self.activityLogPageIndex ? .on : .off
         if index == Self.continuePageIndex { rebuildReadiness() }
-        for button in [generalNavigation, menuBarNavigation, continueNavigation] {
+        if index == Self.activityLogPageIndex {
+            ActivityLog.shared.markSeen()
+            activityLogView.reload()
+            onActivityLogViewed?()
+        }
+        for button in [generalNavigation, menuBarNavigation, continueNavigation, activityLogNavigation] {
             button.contentTintColor = button.state == .on ? .controlAccentColor : .labelColor
         }
         if index != 2 { table.deselectAll(nil) }
@@ -186,11 +204,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func showGeneral() { navigate(to: 0) }
     @objc private func showMenuBar() { navigate(to: 1) }
     @objc private func showContinue() { navigate(to: Self.continuePageIndex) }
+    @objc private func showActivityLog() { navigate(to: Self.activityLogPageIndex) }
 
     /// Opens a page by its name, as the menu's gear does ("continue").
     func select(sectionNamed name: String) {
         switch name {
         case "continue", "keepGoing": navigate(to: Self.continuePageIndex)
+        case "activityLog", "log": navigate(to: Self.activityLogPageIndex)
         case "menuBar": navigate(to: 1)
         default: navigate(to: 0)
         }
@@ -246,7 +266,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         sidebar.blendingMode = .behindWindow
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(sidebar)
-        for (button, selector) in [(generalNavigation, #selector(showGeneral)), (menuBarNavigation, #selector(showMenuBar)), (continueNavigation, #selector(showContinue))] {
+        for (button, selector) in [(generalNavigation, #selector(showGeneral)), (menuBarNavigation, #selector(showMenuBar)), (continueNavigation, #selector(showContinue)), (activityLogNavigation, #selector(showActivityLog))] {
             button.target = self; button.action = selector
             button.setButtonType(.toggle)
             button.bezelStyle = .recessed
@@ -267,12 +287,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let rescan = NSButton(title: "Rescan", target: self, action: #selector(rescanAccounts))
         for button in [add, rescan] { button.bezelStyle = .rounded; button.controlSize = .small }
         let footer = NSStackView(views: [add, rescan]); footer.spacing = 6
-        let navigation = NSStackView(views: [generalNavigation, menuBarNavigation, continueNavigation, caption, scroll, footer])
+        let navigation = NSStackView(views: [generalNavigation, menuBarNavigation, continueNavigation, activityLogNavigation, caption, scroll, footer])
         navigation.orientation = .vertical; navigation.alignment = .leading; navigation.spacing = 6
-        navigation.setCustomSpacing(22, after: continueNavigation)
+        navigation.setCustomSpacing(22, after: activityLogNavigation)
         navigation.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(navigation)
-        for view in [generalNavigation, menuBarNavigation, continueNavigation, scroll] {
+        for view in [generalNavigation, menuBarNavigation, continueNavigation, activityLogNavigation, scroll] {
             view.widthAnchor.constraint(equalTo: navigation.widthAnchor).isActive = true
         }
         pages.tabViewType = .noTabsNoBorder
@@ -292,6 +312,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
                 page.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -20),
             ])
         }
+        let logItem = NSTabViewItem(identifier: "Activity Log")
+        logItem.label = "Activity Log"
+        logItem.view = buildActivityLogSection()
+        pages.addTabViewItem(logItem)
         buildGeneralSection(into: generalPage)
         buildMenuBarSection(into: menuBarPage)
         buildAccountSection(into: accountPage)
@@ -360,11 +384,61 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         ])
     }
 
+    private func buildActivityLogSection() -> NSView {
+        let container = NSView()
+        let title = NSTextField(labelWithString: "Activity Log")
+        title.font = .systemFont(ofSize: 22, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        let subtitle = helpLabel("Background refreshes, auto-started sessions, transfers, and errors.")
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(title)
+        container.addSubview(subtitle)
+        container.addSubview(activityLogView)
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 24),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 26),
+            title.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -26),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            activityLogView.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 14),
+            activityLogView.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            activityLogView.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            activityLogView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+        ])
+        return container
+    }
+
     private func buildAccountSection(into form: NSStackView) {
         accountTitle.font = .systemFont(ofSize: 22, weight: .semibold)
         accountSubtitle.font = .systemFont(ofSize: 11); accountSubtitle.textColor = .secondaryLabelColor
         form.addArrangedSubview(accountTitle); form.setCustomSpacing(5, after: accountTitle)
-        form.addArrangedSubview(accountSubtitle); form.setCustomSpacing(18, after: accountSubtitle)
+        form.addArrangedSubview(accountSubtitle); form.setCustomSpacing(12, after: accountSubtitle)
+
+        accountErrorBanner.identifier = NSUserInterfaceItemIdentifier("accountErrorBanner")
+        accountErrorBanner.orientation = .horizontal
+        accountErrorBanner.alignment = .centerY
+        accountErrorBanner.spacing = 10
+        accountErrorBanner.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        let warnIcon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Connection issue") ?? NSImage())
+        warnIcon.contentTintColor = .systemOrange
+        warnIcon.setContentHuggingPriority(.required, for: .horizontal)
+        accountErrorLabel.font = .systemFont(ofSize: 11)
+        accountErrorLabel.textColor = .labelColor
+        accountErrorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        accountConnectButton.identifier = NSUserInterfaceItemIdentifier("accountConnectButton")
+        accountConnectButton.bezelStyle = .rounded
+        accountConnectButton.controlSize = .small
+        accountConnectButton.target = self
+        accountConnectButton.action = #selector(connectSelectedAccountTapped)
+        accountConnectButton.setContentHuggingPriority(.required, for: .horizontal)
+        accountErrorBanner.addArrangedSubview(warnIcon)
+        accountErrorBanner.addArrangedSubview(accountErrorLabel)
+        accountErrorBanner.addArrangedSubview(accountConnectButton)
+        accountErrorBanner.isHidden = true
+        form.addArrangedSubview(accountErrorBanner); form.setCustomSpacing(12, after: accountErrorBanner)
+        accountErrorBanner.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+
         accountPicker.selectedSegment = 0; accountPicker.target = self; accountPicker.action = #selector(accountSectionChanged)
         accountPicker.segmentStyle = .rounded
         form.addArrangedSubview(accountPicker); form.setCustomSpacing(14, after: accountPicker)
@@ -418,6 +492,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         claudeCodeLogin.target = self; claudeCodeLogin.action = #selector(claudeCodeLoginTapped); claudeCodeLogin.bezelStyle = .rounded
         preference("Claude Code login", control: claudeCodeLogin, into: sessionsPage, id: "claudeCodeLogin")
         claudeCodeLoginRow = Array(sessionsPage.arrangedSubviews.suffix(2))
+        antigravityConnect.target = self; antigravityConnect.action = #selector(connectSelectedAccountTapped); antigravityConnect.bezelStyle = .rounded
+        preference("Antigravity", control: antigravityConnect, into: sessionsPage, id: "antigravityConnect")
+        antigravityConnectionRow = Array(sessionsPage.arrangedSubviews.suffix(2))
         let sessionsHelp = helpLabel("Sends a tiny message on the cheapest model through the provider's own tool: Claude Code, the Codex CLI or Antigravity. Without a Claude Code login, Claude falls back to claude.ai. Mistral has no 5h window.")
         sessionsHelp.maximumNumberOfLines = 0
         sessionsPage.addArrangedSubview(sessionsHelp)
@@ -852,6 +929,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let accountControls = [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, removeButton, providerPopup, labelField, appPathField, dataDirField]
         accountControls.forEach { $0.isEnabled = true }
         updateClaudeCodeLogin(for: profile)
+        updateAntigravityConnection(for: profile)
+        updateConnectionBanner(for: profile)
 
         labelField.stringValue = profile.label
         providerPopup.selectItem(withTitle: profile.provider.displayName)
@@ -887,8 +966,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             accountSubtitle.stringValue = "Sign in when the window opens"
         } else {
             accountTitle.stringValue = "\(profile.provider.displayName) · \(profile.menuBarLabelText)"
-            accountSubtitle.stringValue = [profile.accountEmail ?? profile.accountName, profile.usage?.accountPlan ?? profile.accountPlan]
-                .compactMap { $0 }.joined(separator: "  ·  ")
+            var subtitleParts = [profile.accountEmail ?? profile.accountName, profile.usage?.accountPlan ?? profile.accountPlan]
+                .compactMap { $0 }
+            if profile.provider == .gemini {
+                if profile.signedIn == true && profile.refreshError == nil && GeminiLanguageServer.executable(for: profile.appPath) != nil {
+                    subtitleParts.append("Connected via Antigravity")
+                } else {
+                    subtitleParts.append("Not connected")
+                }
+            }
+            accountSubtitle.stringValue = subtitleParts.joined(separator: "  ·  ")
         }
         for view in manualInventory.arrangedSubviews { manualInventory.removeArrangedSubview(view); view.removeFromSuperview() }
         if let inventory = profile.usage?.manualResets {
@@ -913,7 +1000,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func clearAccountSection() {
         accountTitle.stringValue = "No account selected"
         accountSubtitle.stringValue = "Add one with the + button"
-        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, claudeCodeLogin, removeButton, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
+        accountErrorBanner.isHidden = true
+        [showManualResets, showSparklines, showLabels, showSession, showWeeklyLimits, showResets, resetAlerts, menuBarAccount, autoStartSession, startSessionNow, claudeCodeLogin, antigravityConnect, removeButton, providerPopup, labelField, appPathField, dataDirField, iconLabelField].forEach { $0.isEnabled = false }
         menuBarAccount.state = .off
         iconLabelField.stringValue = ""
         iconLabelDefault.stringValue = ""
@@ -1046,6 +1134,66 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             statusLabel.stringValue = "Finish signing in as \(profile.accountEmail ?? "this account") in Terminal, then reselect the account."
         } catch {
             statusLabel.stringValue = error.localizedDescription
+        }
+    }
+
+    private func updateAntigravityConnection(for profile: LaunchProfile) {
+        antigravityConnectionRow.forEach { $0.isHidden = profile.provider != .gemini }
+        guard profile.provider == .gemini else { return }
+
+        let installed = GeminiLanguageServer.executable(for: profile.appPath) != nil
+        if !installed {
+            antigravityConnect.title = "Install Antigravity first"
+            antigravityConnect.isEnabled = false
+            antigravityConnect.toolTip = "Antigravity wasn't found at \(Launcher.expanding(profile.appPath)). Install Antigravity so Gemini usage and 5h sessions can run through it."
+            return
+        }
+
+        let connected = profile.isPendingLogin != true && profile.signedIn == true && profile.refreshError == nil
+        if connected {
+            antigravityConnect.title = "Connected · Open Antigravity"
+            antigravityConnect.isEnabled = true
+            antigravityConnect.toolTip = "Usage and 5h session starts run through Antigravity as \(profile.accountEmail ?? "your Google account"). Click to open Antigravity."
+        } else {
+            antigravityConnect.title = "Connect Antigravity…"
+            antigravityConnect.isEnabled = true
+            antigravityConnect.toolTip = profile.refreshError ?? "Open Antigravity to sign in to your Google account."
+        }
+    }
+
+    private func updateConnectionBanner(for profile: LaunchProfile) {
+        let appName = profile.provider == .gemini ? "Antigravity" : profile.provider.displayName
+        let missingApp = profile.provider == .gemini && GeminiLanguageServer.executable(for: profile.appPath) == nil
+        let hasProblem = missingApp || profile.isPendingLogin == true || profile.signedIn != true || profile.refreshError != nil
+
+        accountErrorBanner.isHidden = !hasProblem
+        guard hasProblem else { return }
+
+        if missingApp {
+            accountErrorLabel.stringValue = "Antigravity isn't installed at \(Launcher.expanding(profile.appPath)). Install it to connect Gemini."
+            accountConnectButton.title = "Install Antigravity"
+            accountConnectButton.isEnabled = false
+        } else if let refreshError = profile.refreshError, !refreshError.isEmpty {
+            accountErrorLabel.stringValue = refreshError
+            accountConnectButton.title = "Connect \(appName)…"
+            accountConnectButton.isEnabled = true
+        } else if profile.isPendingLogin == true || profile.signedIn != true {
+            accountErrorLabel.stringValue = "Not connected to \(appName). Sign in to track usage and start 5h sessions."
+            accountConnectButton.title = "Connect \(appName)…"
+            accountConnectButton.isEnabled = true
+        }
+    }
+
+    @objc private func connectSelectedAccountTapped() {
+        let row = table.selectedRow
+        guard row >= 0, row < config.profiles.count else { return }
+        let profile = config.profiles[row]
+        let appName = profile.provider == .gemini ? "Antigravity" : profile.provider.displayName
+        do {
+            try Launcher.launch(profile)
+            statusLabel.stringValue = "Opened \(appName). Finish signing in there, then click Rescan or Refresh."
+        } catch {
+            statusLabel.stringValue = "Couldn't open \(appName): \(error.localizedDescription)"
         }
     }
 

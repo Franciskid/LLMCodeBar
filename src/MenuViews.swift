@@ -709,6 +709,8 @@ final class ProfileMenuItemView: NSView {
     /// The card's menu-bar pin, when it has one - the menu unpins other cards in place
     /// when a third account bumps one out of the menu bar.
     private(set) var menuBarPin: MenuBarPinView?
+    /// Compact data for the scrolled-out overflow dock when more than 3 accounts exist.
+    let overflowSummary: OverflowAccountSummary
 
     /// Folded, a card is its header line alone, with two mini bars for its limits.
     static let foldedHeight: CGFloat = 30
@@ -767,20 +769,49 @@ final class ProfileMenuItemView: NSView {
         let headerBottom: CGFloat = 29
         let bodyTop = headerBottom + (alert == nil ? 7 : 2 + 15 + 6)
         let height = bodyTop + bodyHeight + 10
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: height))
-        identifier = NSUserInterfaceItemIdentifier(profileID)
-        wantsLayer = true
 
         let appIcon = NSWorkspace.shared.icon(forFile: Launcher.expanding(profile.appPath))
         appIcon.size = NSSize(width: 18, height: 18)
-        let icon = NSImageView(image: appIcon)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.imageScaling = .scaleProportionallyUpOrDown
 
         // The part of the address before the @ reads as the account's name; the heading
         // above already says which app.
         let fullTitle = ProfileFormatting.title(for: profile)
         let shortName = profile.accountEmail == nil ? fullTitle : String(fullTitle.split(separator: "@").first ?? Substring(fullTitle))
+        let planName = (profile.usage?.accountPlan ?? profile.accountPlan)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let primaryWindow = windows.first { $0.title == "5h" } ?? windows.first
+        let secondaryWindow = windows.first { $0.title == "Week" }
+        let isMonthlyOnly = primaryWindow?.title == "Month" && secondaryWindow == nil
+        var tipLines = ["\(profile.provider.displayName) · \(shortName)" + (planName.flatMap { $0.isEmpty ? nil : " (\($0))" } ?? "")]
+        if windows.isEmpty {
+            tipLines.append("Usage unavailable")
+        } else {
+            for w in windows {
+                let reset = ProfileFormatting.resetText(for: w)
+                let resetSuffix = reset.isEmpty ? "" : " · \(reset)"
+                tipLines.append("\(QuotaWindowView.shortTitle(w.title)): \(ProfileFormatting.usedText(for: w))\(resetSuffix)")
+            }
+        }
+        tipLines.append("Click to jump to account")
+        self.overflowSummary = OverflowAccountSummary(
+            profileID: profile.id,
+            providerName: profile.provider.displayName,
+            shortName: shortName,
+            badgeLabel: profile.menuBarLabelText,
+            appIcon: appIcon,
+            primaryPercent: primaryWindow?.usedPercent,
+            secondaryPercent: secondaryWindow?.usedPercent,
+            isMonthlyOnly: isMonthlyOnly,
+            tooltip: tipLines.joined(separator: "\n")
+        )
+
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: height))
+        identifier = NSUserInterfaceItemIdentifier(profileID)
+        wantsLayer = true
+
+        let icon = NSImageView(image: appIcon)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyUpOrDown
+
         let name = NSTextField(labelWithString: shortName)
         name.translatesAutoresizingMaskIntoConstraints = false
         name.font = .systemFont(ofSize: 13, weight: .semibold)

@@ -63,7 +63,7 @@ let settings = SettingsWindowController(config: editedConfig, onChange: { mutate
 settings.window!.contentView!.layoutSubtreeIfNeeded()
 check(settings.window!.frame.height < 700, "settings stays compact")
 let pages = descendants(settings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
-check(pages.tabViewItems.map(\.label) == ["General", "Menu bar", "Account", "Continue after limits"], "General, menu-bar, account and continue controls each have a page")
+check(pages.tabViewItems.map(\.label) == ["General", "Menu bar", "Account", "Continue after limits", "Activity Log"], "General, menu-bar, account, continue and activity log controls each have a page")
 check(pages.selectedTabViewItem?.label == "General", "General opens independently")
 pages.selectTabViewItem(at: 1)
 settings.window!.contentView!.layoutSubtreeIfNeeded()
@@ -111,6 +111,53 @@ for (row, claude) in [(1, false), (0, true), (1, false), (0, true)] {
 let sessionsHelpText = descendants(sessionsAccountView).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasPrefix("Sends a tiny message") }!
 check(sessionsHelpText.frame.height >= sessionsHelpText.intrinsicContentSize.height - 1, "Sessions help text isn't cut off")
 try snapshot(sessionsAccountView, "settings-sessions")
+
+// Gemini connection row in Sessions + error/connect banner when disconnected or errored.
+var disconnectedGemini = LaunchProfile.pending(provider: .gemini, appPath: GeminiLanguageServer.defaultAppPath, dataDir: "/tmp/test-gemini")
+disconnectedGemini.isPendingLogin = false
+disconnectedGemini.signedIn = false
+disconnectedGemini.refreshError = "Not signed in to Antigravity."
+var connectedGemini = disconnectedGemini
+connectedGemini.id = "connected-gemini"
+connectedGemini.signedIn = true
+connectedGemini.refreshError = nil
+connectedGemini.accountEmail = "user@gmail.com"
+connectedGemini.accountPlan = "Pro"
+var geminiSettingsConfig = AppConfig(launchAtLogin: false, profiles: [disconnectedGemini, connectedGemini])
+let geminiSettings = SettingsWindowController(config: geminiSettingsConfig, onChange: { mutate in mutate(&geminiSettingsConfig) }, onCheckForUpdates: { _ in })
+let geminiTable = descendants(geminiSettings.window!.contentView!).compactMap { $0 as? NSTableView }.first!
+let geminiTabs = descendants(geminiSettings.window!.contentView!).compactMap { $0 as? NSTabView }.first!
+geminiTabs.selectTabViewItem(at: 2)
+let geminiAccountView = geminiTabs.tabViewItems[2].view!
+let errorBanner = descendants(geminiAccountView).first { $0.identifier?.rawValue == "accountErrorBanner" }!
+let connectBtn = descendants(geminiAccountView).compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == "accountConnectButton" }!
+geminiTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+geminiSettings.window!.contentView!.layoutSubtreeIfNeeded()
+check(!errorBanner.isHidden && connectBtn.title.contains("Antigravity"), "disconnected Gemini shows error banner and Connect Antigravity button on Display")
+let geminiPicker = descendants(geminiAccountView).compactMap { $0 as? NSSegmentedControl }.first { (control: NSSegmentedControl) in control.segmentCount == 3 }!
+geminiPicker.selectedSegment = 1
+_ = geminiPicker.target?.perform(geminiPicker.action!, with: geminiPicker)
+geminiSettings.window!.contentView!.layoutSubtreeIfNeeded()
+let antigravityBtn = descendants(geminiAccountView).compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == "antigravityConnect" }!
+check(!antigravityBtn.superview!.isHidden && antigravityBtn.title.contains("Connect Antigravity"), "disconnected Gemini shows Connect Antigravity in Sessions")
+geminiTable.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+geminiSettings.window!.contentView!.layoutSubtreeIfNeeded()
+if GeminiLanguageServer.executable(for: connectedGemini.appPath) != nil {
+    check(errorBanner.isHidden, "connected Gemini hides error banner")
+    check(antigravityBtn.title.contains("Connected"), "connected Gemini shows Antigravity connected status in Sessions")
+}
+
+// Activity Log lives in Settings AND its popup window has a Close button next to Clear.
+settings.select(sectionNamed: "activityLog")
+check(pages.selectedTabViewItem?.label == "Activity Log", "Activity Log is accessible inside Settings")
+let logPopup = ActivityLogWindowController()
+let popupBar = descendants(logPopup.window!.contentView!).compactMap { $0 as? NSStackView }.first { $0.identifier?.rawValue == "activityLogBar" }!
+let barIDs = popupBar.arrangedSubviews.compactMap { $0.identifier?.rawValue }
+check(barIDs == ["activityLogClear", "activityLogClose"], "Activity Log popup has Close right next to Clear: \(barIDs)")
+let settingsLogBar = descendants(pages.tabViewItems[4].view!).compactMap { $0 as? NSStackView }.first { $0.identifier?.rawValue == "activityLogBar" }!
+let settingsBarIDs = settingsLogBar.arrangedSubviews.compactMap { $0.identifier?.rawValue }
+check(settingsBarIDs == ["activityLogClear", "activityLogClose"], "Embedded Settings Activity Log also has Close next to Clear: \(settingsBarIDs)")
+
 settings.select(sectionNamed: "continue")
 check(pages.selectedTabViewItem?.label == "Continue after limits", "the menu's gear opens the continue page")
 let continueControls = descendants(pages.tabViewItems[3].view!)
@@ -438,6 +485,80 @@ if case let .user(uText, _) = parsedVibeSteps[0], case let .agent(aText, _) = pa
 }
 let localVibeSessions = MistralSessionTransfer.sessions(limit: 20)
 print("Passed: Mistral monthly budget parsing, no-5h-kick guard, and Vibe journal extraction. Local Vibe sessions readable: \(localVibeSessions.count).")
+
+// Overflow dock: <=3 accounts needs no dock; >3 accounts shows pre-mounted chips that
+// scrub smoothly with native free scrolling (including half-scrolling) and jump on click.
+do {
+    let app = NSApplication.shared
+    func makeProfile(_ id: String, provider: Provider, email: String, label: String, five: Double, week: Double?, monthly: Bool = false) -> LaunchProfile {
+        var p = LaunchProfile.pending(provider: provider, appPath: "/Applications/Claude.app", dataDir: "/tmp/dock-\(id)")
+        p.id = id
+        p.isPendingLogin = false
+        p.signedIn = true
+        p.accountEmail = email
+        p.accountPlan = "Pro"
+        p.menuBarLabel = label
+        var wins: [UsageWindow] = [
+            UsageWindow(title: monthly ? "Month" : "5h", usedPercent: five, remainingPercent: 100 - five, resetsAt: now.addingTimeInterval(3600))
+        ]
+        if let week {
+            wins.append(UsageWindow(title: "Week", usedPercent: week, remainingPercent: 100 - week, resetsAt: now.addingTimeInterval(3 * 86400)))
+        }
+        p.usage = UsageInfo(source: "test", status: nil, windows: wins, creditsRemaining: nil, accountEmail: email, accountPlan: "Pro", updatedAt: now)
+        return p
+    }
+
+    let p1 = makeProfile("c95", provider: .claude, email: "franciskid95@gmail.com", label: "95", five: 25, week: 100)
+    let p2 = makeProfile("c97", provider: .claude, email: "franciskid97@gmail.com", label: "97", five: 100, week: 27)
+    let p3 = makeProfile("g97", provider: .codex, email: "franciskid97@gmail.com", label: "97", five: 0, week: 100)
+    let p4 = makeProfile("gem", provider: .gemini, email: "franciskid97@gmail.com", label: "97", five: 18, week: 5)
+    let p5 = makeProfile("mis", provider: .mistral, email: "franciskid97@gmail.com", label: "fr", five: 24.5, week: nil, monthly: true)
+
+    func makeCard(_ p: LaunchProfile) -> ProfileMenuItemView {
+        ProfileMenuItemView(profile: p, target: app, action: #selector(NSApplication.stop(_:)), isRefreshing: false, isRunning: false, showSparklines: false, inMenuBar: false)
+    }
+
+    // 3 accounts: no scroll view, no overflow dock.
+    let smallFold = AccountsFoldView(views: [ProviderHeaderView(title: "Claude"), makeCard(p1), makeCard(p2), makeCard(p3)], maxFullCards: 3)
+    check(smallFold.scrollView == nil && smallFold.overflowDockView == nil, "3 or fewer accounts do not create scroll view or overflow dock")
+
+    // 5 accounts: scroll view + fixed-height overflow dock.
+    let views: [NSView] = [
+        ProviderHeaderView(title: "Claude"), makeCard(p1), makeCard(p2),
+        ProviderHeaderView(title: "ChatGPT"), makeCard(p3),
+        ProviderHeaderView(title: "Gemini"), makeCard(p4),
+        ProviderHeaderView(title: "Mistral"), makeCard(p5),
+    ]
+    let fold = AccountsFoldView(views: views, maxFullCards: 3)
+    check(fold.scrollView != nil && fold.overflowDockView != nil, "5 accounts create scroll view and overflow dock")
+    let dock = fold.overflowDockView!
+    let scroll = fold.scrollView!
+    check(dock.frame.height == OverflowDockView.height, "Overflow dock has fixed height \(OverflowDockView.height)pt")
+
+    // At scroll top: first 3 accounts visible (vis == 0), bottom 2 hidden (vis == 1).
+    check(dock.visibilities.count == 5, "Dock tracks all 5 account slots")
+    check(dock.visibilities[0] < 0.01 && dock.visibilities[1] < 0.01 && dock.visibilities[2] < 0.01, "Top 3 cards hidden visibility is 0 at scroll top: \(dock.visibilities)")
+    check(dock.visibilities[3] > 0.99 && dock.visibilities[4] > 0.99, "Bottom 2 cards (Gemini & Mistral) are fully shown in dock at scroll top: \(dock.visibilities)")
+
+    // Half-scroll: card 0 partially scrolled off top produces fractional smoothstep visibility (0 < v < 1).
+    let halfY = views[0].frame.height + views[1].frame.height * 0.6
+    scroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: halfY))
+    fold.updateOverflowDock()
+    check(dock.visibilities[0] > 0.05 && dock.visibilities[0] < 0.95, "Half-scrolling scrubs first chip smoothly (0 < v < 1): got \(dock.visibilities[0])")
+
+    // Programmatic click-to-jump scrolls to Mistral at bottom; top cards now appear in dock.
+    // (Mistral is 1 row tall, so card 1 still peeks slightly at the top edge -> ~0.88 visibility.)
+    fold.scrollToAccount(at: 4, animated: false)
+    check(dock.visibilities[0] > 0.99 && dock.visibilities[1] > 0.7, "Scrolling to bottom shows top 2 cards in dock: \(dock.visibilities)")
+    check(dock.visibilities[4] < 0.01, "Scrolled-to Mistral card leaves the overflow dock: \(dock.visibilities)")
+
+    // Folding collapses the overflow dock cleanly.
+    fold.setFolded(true, animated: false)
+    check(dock.frame.height == 0 && dock.alphaValue == 0, "Folding collapses and hides the overflow dock")
+    fold.setFolded(false, animated: false)
+    check(dock.frame.height == OverflowDockView.height && dock.alphaValue == 1, "Unfolding restores the overflow dock")
+    print("Passed: Smooth native-scroll overflow dock (3-card bypass, top/half-scroll/bottom scrubbing, click-to-scroll, fold collapse).")
+}
 
 if CommandLine.arguments.contains("--test-codex-import") {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("LLMCodeBar-integration-" + UUID().uuidString)
